@@ -24,6 +24,11 @@ dropped, V2-only attention, idiomatic names, and removal of the parity harness.
   Params is pure serializable data (`json.dumps(asdict(params))` works).
 - Naming: **HealSwin family** for the HP model, **SwinUnet family** for flat.
 - Layout: one directory per concern — `models/` and `hp/`.
+- **RoPE joins as an alternative positional encoding** (rope-vit style,
+  intra-window): a `pos_embed` enum replaces the `use_rel_pos_bias` bool in
+  both Params classes. Both `rope_axial` and `rope_mixed` variants are
+  implemented; HP default is `rope_mixed`, flat default is `rel_bias`
+  (its current behavior).
 
 ## A — Params dataclasses
 
@@ -48,7 +53,9 @@ class HealSwinParams:
     num_heads: tuple[int, ...] = (3, 6, 12, 24)
     mlp_ratio: float = 4.0
     qkv_bias: bool = True
-    use_rel_pos_bias: bool = False              # was rel_pos_bias="flat"
+    pos_embed: Literal["none", "rel_bias",      # "rel_bias" was rel_pos_bias="flat"
+                       "rope_axial", "rope_mixed"] = "rope_mixed"
+    rope_theta: float = 10.0                    # rope-vit Swin default
     patch_embed_norm: bool = False              # was patch_embed_norm_layer="layernorm"
     shift_strategy: Literal["nest_roll", "nest_grid_shift",
                             "nest_grid_shift_exact",
@@ -75,9 +82,14 @@ Derived properties (not fields): `npix = len(base_pixels) * nside**2` (was
   `4**(len(depths) - 1)` so every encoder stage has an integer per-face nside;
   `embed_dim * 2**i % num_heads[i] == 0` for every stage.
 - `len(depths) == len(num_heads)`.
+- When `pos_embed` is a RoPE variant: head dim (`embed_dim * 2**i //
+  num_heads[i]`) divisible by 4 at every stage (the 2D frequency split needs
+  `head_dim // 4` magnitudes per axis).
 
-**Default change vs. reference:** `shift_strategy` defaults to
-`nest_grid_shift_exact` (the seam-exact strategy) instead of `nest_roll`.
+**Default changes vs. reference:** `shift_strategy` defaults to
+`nest_grid_shift_exact` (the seam-exact strategy) instead of `nest_roll`,
+and `pos_embed` defaults to `"rope_mixed"` where the reference default was
+no positional encoding at all (`rel_pos_bias=None`).
 
 ### `SwinParams` (in `models/swin.py`)
 
@@ -96,7 +108,9 @@ class SwinParams:
     num_heads: tuple[int, ...] = (3, 6, 12, 24)
     mlp_ratio: float = 4.0
     qkv_bias: bool = True
-    use_rel_pos_bias: bool = True               # flat-model default stays True
+    pos_embed: Literal["none", "rel_bias",
+                       "rope_axial", "rope_mixed"] = "rel_bias"  # current behavior
+    rope_theta: float = 10.0
     use_masking: bool = True
     patch_embed_norm: bool = False
     drop_rate: float = 0.0
@@ -119,7 +133,8 @@ explicit `shift_size`.
 `dim_in`, `base_pix`, `class_names` (data-pipeline metadata, not model
 config — downstream code tracks class names itself), `qk_scale`, `norm_layer`,
 `patch_embed_norm_layer` (string), `use_cos_attn`, `use_v2_norm_placement`,
-`ape`, `shift_size`.
+`ape`, `shift_size`. `rel_pos_bias` / `use_rel_pos_bias` are subsumed by the
+`pos_embed` enum (`"rel_bias"` is the old `"flat"` bias).
 
 ## B — Model code
 
@@ -128,6 +143,30 @@ config — downstream code tracks class names itself), `qk_scale`, `norm_layer`,
   scaled-dot-product branch, `scale`, and `qk_scale` are deleted. Blocks use
   post-norm (V2) placement unconditionally; `use_v2_norm_placement` branches
   are removed.
+- **RoPE positional encoding** (rope-vit style, `references/rope-vit`;
+  Heo et al., ECCV 2024). Purely intra-window: token coordinates `t_x, t_y`
+  are positions *inside* a window, identical for all windows, so nothing
+  touches the shift machinery or global sphere geometry.
+  - HP model: `t_x, t_y` come from inverting `get_nest_win_idcs(window_size)`
+    (the nested→Cartesian window map that already backs the flat rel-pos
+    bias) — same "window ≈ flat 2^k×2^k grid" approximation as `rel_bias`.
+    Flat model: plain meshgrid over `(Wh, Ww)`.
+  - `rope_axial`: fixed frequencies, x-features in the first `head_dim//2`
+    channels, y-features in the second; the rotation table is a precomputed
+    `Buffer` of shape `(window_size, head_dim//2, 2, 2)`. Real-valued 2×2
+    rotation formulation — adapt `rope()` / `apply_rope()` from GenSBI
+    `flux1/math.py` (already JAX).
+  - `rope_mixed`: learned per-head frequencies, an `nnx.Param` of shape
+    `(2, num_heads, head_dim//2)` initialized per rope-vit
+    `init_random_2d_freqs` (random per-head axis rotations); the rotation
+    table is recomputed each forward from the current frequencies.
+  - Applied to q and k inside `WindowAttention` before the cosine-similarity
+    product. Rotary rotation is norm-preserving per 2D pair, so its placement
+    relative to the L2 normalization is mathematically immaterial; we rotate
+    the normalized q, k.
+  - `pos_embed="rel_bias"` keeps the existing bias-table path; `"none"`
+    disables positional encoding entirely. The variants are mutually
+    exclusive (no RoPE + bias combination, matching rope-vit defaults).
 - **Params threaded down.** Stage/block constructors take the Params object
   plus only stage-local values (`dim`, `input_resolution`, `drop_path`
   slice, `shifted: bool`), replacing the 17-kwarg constructor chains and
@@ -170,6 +209,17 @@ Kept, updated to the new API: `test_model.py`, `test_shifting.py`,
 `test_buffers.py`. `test_dataspec.py` becomes `test_params.py` (validation
 rules + derived properties for both Params classes).
 
+New `test_rope.py`:
+
+- intra-window coordinates: the `t_x, t_y` decode round-trips
+  `get_nest_win_idcs` (derive-then-verify against the existing map, not
+  against itself);
+- `apply_rope` preserves q/k norms (per head, to f32 tolerance);
+- relative-position property for `rope_axial`: attention logits between two
+  tokens depend only on their coordinate offset (translate the window
+  contents, logits unchanged);
+- shape/forward smoke tests for all four `pos_embed` values on both models.
+
 These behavior-level invariants (seam correctness, shift round-trips, window
 layout adjacency, shape checks) are the correctness net now that goldens are
 gone. The geometry modules move to `hp/` unchanged, so their tests need only
@@ -210,5 +260,6 @@ get their examples updated to the new API.
 - `param_dtype` / mixed-precision threading (possible future addition; noted,
   not designed).
 - Encoder-only / regression heads (next project phase, separate design).
-- Any change to HP geometry algorithms in `hp/` — content moves, behavior
-  does not.
+- Any change to existing HP geometry algorithms in `hp/` — content moves,
+  behavior does not. (Exception: `hp/windowing.py` gains one new *additive*
+  helper, the intra-window `t_x, t_y` coordinate decode for RoPE.)
