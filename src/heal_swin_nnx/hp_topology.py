@@ -91,3 +91,74 @@ def global_to_local(base_pixels, nside, idx):
     f, p = np.divmod(np.asarray(idx, dtype=np.int64), face_len)
     lf = lut[f]
     return np.where(lf < 0, np.int64(-1), lf * face_len + p)
+
+
+def _enter(nside, side, depth, run):
+    """Coords inside the neighbour entered through `side` at `depth` past the
+    seam, `run` along it. Along-edge orientation is identity (Map2Patches
+    convention, validated in production padding); the exhaustive healpy
+    neighbour test arbitrates — a failing seam would be fixed here with a
+    per-(face, column) run reversal."""
+    if side == 0:
+        return nside - 1 - depth, run
+    if side == 1:
+        return run, depth
+    if side == 2:
+        return depth, run
+    return run, nside - 1 - depth  # side == 3
+
+
+def _cross_x(nside, x, y, face):
+    col, depth = (0, x - nside) if x >= nside else (2, -1 - x)
+    g = int(neighbours_matrix[face][col])
+    xr, yr = _enter(nside, int(side_matrix[face][col]), depth, y)
+    return xr, yr, g
+
+
+def _cross_y(nside, x, y, face):
+    col, depth = (3, y - nside) if y >= nside else (1, -1 - y)
+    g = int(neighbours_matrix[face][col])
+    xr, yr = _enter(nside, int(side_matrix[face][col]), depth, x)
+    return xr, yr, g
+
+
+def walk(nside, x, y, face):
+    """Resolve possibly out-of-range face-local coords to on-sphere (x, y, face).
+
+    Returns None at a pinch corner (no diagonal face there). Supports at most
+    one crossing per axis (|overflow| < nside), which every caller satisfies.
+    Corner crossings are composed from two edge crossings; both orders must
+    agree, which fails exactly at pinch corners (checked via the corner matrix
+    first, asserted for regular corners).
+    """
+    x, y, face = int(x), int(y), int(face)
+    x_in, y_in = 0 <= x < nside, 0 <= y < nside
+    if x_in and y_in:
+        return x, y, face
+    if not x_in and not y_in:
+        col = {(True, True): 3, (True, False): 0,
+               (False, False): 1, (False, True): 2}[(x >= nside, y >= nside)]
+        if corner_faces_matrix[face][col] == -1:
+            return None
+        r1 = walk(nside, *_cross_x(nside, x, y, face))
+        r2 = walk(nside, *_cross_y(nside, x, y, face))
+        assert r1 == r2, "corner walk inconsistent at face %d col %d" % (face, col)
+        assert r1[2] == corner_faces_matrix[face][col]
+        return r1
+    if not x_in:
+        return walk(nside, *_cross_x(nside, x, y, face))
+    return walk(nside, *_cross_y(nside, x, y, face))
+
+
+def grid_neighbours(nside, pix):
+    """The <=8 sky-adjacent pixels of a global NEST pixel (pinch diagonals absent)."""
+    x, y, f = pix2xyf(nside, int(pix))
+    out = set()
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if dx == 0 and dy == 0:
+                continue
+            r = walk(nside, int(x) + dx, int(y) + dy, int(f))
+            if r is not None:
+                out.add(int(xyf2pix(nside, r[0], r[1], r[2])))
+    return out

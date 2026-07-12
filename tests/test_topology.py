@@ -40,3 +40,13 @@ def test_topology_matrices_shape_and_symmetry():
     # aligned between the two corner matrices
     assert (hpt.corner_faces_matrix == -1).sum() == 24
     assert np.array_equal(hpt.corner_sides_matrix == -1, hpt.corner_faces_matrix == -1)
+
+
+@pytest.mark.parametrize("nside", [2, 4, 8])
+def test_grid_neighbours_match_healpy_exhaustively(nside):
+    """Every pixel's neighbour set must equal healpy's (edges, corners,
+    orientation, and pinch points all validated in one sweep)."""
+    for pix in range(12 * nside ** 2):
+        ours = hpt.grid_neighbours(nside, pix)
+        theirs = set(int(v) for v in hp.get_all_neighbours(nside, pix, nest=True) if v >= 0)
+        assert ours == theirs, "pixel %d: %r != %r" % (pix, sorted(ours), sorted(theirs))
