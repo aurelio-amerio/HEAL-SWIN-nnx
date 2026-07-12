@@ -77,3 +77,17 @@ def test_healswin_forward_all_pos_embeds():
         y = model(jnp.ones((1, p.npix, 2)))
         assert y.shape == (1, p.npix, 3), pos_embed
         assert np.isfinite(np.asarray(y)).all(), pos_embed
+
+
+def test_swinunet_forward_all_pos_embeds():
+    from flax import nnx
+    from heal_swin_nnx import SwinParams, SwinUnet
+    for pos_embed in ["none", "rel_bias", "rope_axial", "rope_mixed"]:
+        p = SwinParams(img_size=(32, 64), in_channels=2, out_channels=3,
+                       embed_dim=16, depths=(2, 2), num_heads=(2, 4),
+                       drop_path_rate=0.0, pos_embed=pos_embed)
+        model = SwinUnet(p, rngs=nnx.Rngs(0))
+        model.eval()
+        y = model(jnp.ones((1, 32, 64, 2)))
+        assert y.shape == (1, 32, 64, 3), pos_embed
+        assert np.isfinite(np.asarray(y)).all(), pos_embed

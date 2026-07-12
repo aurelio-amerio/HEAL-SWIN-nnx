@@ -78,3 +78,41 @@ def test_unknown_enum_values_rejected():
         HealSwinParams(nside=16, in_channels=1, out_channels=1, pos_embed="learned")
     with pytest.raises(ValueError):
         HealSwinParams(nside=16, in_channels=1, out_channels=1, shift_strategy="roll")
+
+
+from heal_swin_nnx.models.swin import SwinParams
+
+
+def test_swin_params_defaults_and_coercion():
+    # default depths (2, 2, 2, 2) -> img must divide patch*window*2^(L-1) = 128
+    p = SwinParams(img_size=(128, 256), in_channels=3, out_channels=5)
+    assert p.patch_size == (4, 4) and p.window_size == (4, 4)
+    assert p.shift_size == (2, 2)
+    assert p.patches_resolution == (32, 64)
+    assert p.pos_embed == "rel_bias"
+    p2 = SwinParams(img_size=64, in_channels=1, out_channels=1, window_size=8,
+                    depths=(2, 2), num_heads=(2, 4), embed_dim=16)
+    assert p2.img_size == (64, 64) and p2.window_size == (8, 8)
+    assert p2.shift_size == (4, 4)
+
+
+def test_swin_params_serializable():
+    import dataclasses, json
+    json.dumps(dataclasses.asdict(SwinParams(img_size=(128, 128), in_channels=3,
+                                             out_channels=5)))
+
+
+def test_swin_params_rejects_indivisible_geometry():
+    import pytest
+    # H=60 not divisible by patch*window*2^(L-1) = 4*4*8
+    with pytest.raises(ValueError):
+        SwinParams(img_size=(60, 64), in_channels=1, out_channels=1)
+
+
+def test_swin_params_rope_head_dim_check():
+    import pytest
+    with pytest.raises(ValueError):
+        SwinParams(img_size=(32, 32), in_channels=1, out_channels=1, embed_dim=12,
+                   depths=(2, 2), num_heads=(2, 4), pos_embed="rope_mixed")
+    SwinParams(img_size=(32, 32), in_channels=1, out_channels=1, embed_dim=16,
+               depths=(2, 2), num_heads=(2, 4), pos_embed="rope_mixed")

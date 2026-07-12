@@ -1,8 +1,8 @@
 import jax.numpy as jnp
 from flax import nnx
 
+from heal_swin_nnx import HealSwinParams, SwinParams
 from heal_swin_nnx.variables import Buffer
-from heal_swin_nnx.config import DataSpec, SwinHPTransformerConfig, SwinTransformerConfig
 
 
 class Toy(nnx.Module):
@@ -30,15 +30,10 @@ def test_buffer_not_differentiated():
     assert not any("idx" in path for path in flat)
 
 
-def test_configs_construct_with_reference_defaults():
-    hp = SwinHPTransformerConfig()
+def test_params_construct_with_defaults():
+    hp = HealSwinParams(nside=16, in_channels=3, out_channels=5)
     assert hp.patch_size == 4 and hp.window_size == 4 and hp.shift_size == 2
-    assert hp.shift_strategy == "nest_roll" and hp.rel_pos_bias is None
-    assert hp.depths == [2, 2, 2, 2] and hp.num_heads == [3, 6, 12, 24]
-    flat = SwinTransformerConfig()
+    assert hp.shift_strategy == "nest_grid_shift_exact" and hp.pos_embed == "rope_mixed"
+    flat = SwinParams(img_size=(128, 128), in_channels=3, out_channels=5)
     assert flat.patch_size == (4, 4) and flat.window_size == (4, 4)
-    assert flat.shift_size == (2, 2)  # -1 sentinel resolved to window//2
-    flat2 = SwinTransformerConfig(window_size=8, shift_size=3)
-    assert flat2.window_size == (8, 8) and flat2.shift_size == (3, 3)
-    ds = DataSpec(dim_in=2048, f_in=3, f_out=5, base_pix=8, class_names=["a"] * 5)
-    assert ds.dim_in == 2048
+    assert flat.shift_size == (2, 2)
