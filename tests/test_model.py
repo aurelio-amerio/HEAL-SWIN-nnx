@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from heal_swin_nnx import HealSwin, HealSwinEncoder, HealSwinParams
+from heal_swin_nnx import HealSwin, HealSwinEncoder, HealSwinParams, SwinParams, SwinUnet
 from heal_swin_nnx.layers import DropPath, Identity, Mlp
 
 
@@ -126,6 +126,39 @@ def test_rope_buffers_and_params_sorted_correctly():
     assert not any("rope_coords" in p for p in param_paths)  # coords are Buffers
 
     axial, _ = tiny_hp(pos_embed="rope_axial")
+    param_paths = ["/".join(str(q) for q in path)
+                   for path, _ in nnx.to_flat_state(nnx.state(axial, nnx.Param))]
+    assert not any("rope_table" in p for p in param_paths)   # fixed table is a Buffer
+
+
+def tiny_flat_params(**over):
+    kw = dict(img_size=(32, 64), in_channels=2, out_channels=3, embed_dim=16,
+              depths=(2, 2), num_heads=(2, 4), drop_path_rate=0.0)
+    kw.update(over)
+    return SwinParams(**kw)
+
+
+def tiny_flat(**over):
+    p = tiny_flat_params(**over)
+    return SwinUnet(p, rngs=nnx.Rngs(0)), p
+
+
+def test_flat_no_buffer_is_a_param():
+    model, _ = tiny_flat(pos_embed="rel_bias")
+    params = dict(nnx.to_flat_state(nnx.state(model, nnx.Param)))
+    for path in params:
+        joined = "/".join(str(q) for q in path)
+        assert "attn_mask" not in joined and "relative_position_index" not in joined
+
+
+def test_flat_rope_buffers_and_params_sorted_correctly():
+    mixed, _ = tiny_flat(pos_embed="rope_mixed")
+    param_paths = ["/".join(str(q) for q in path)
+                   for path, _ in nnx.to_flat_state(nnx.state(mixed, nnx.Param))]
+    assert any("rope_freqs" in p for p in param_paths)      # learned freqs train
+    assert not any("rope_coords" in p for p in param_paths)  # coords are Buffers
+
+    axial, _ = tiny_flat(pos_embed="rope_axial")
     param_paths = ["/".join(str(q) for q in path)
                    for path, _ in nnx.to_flat_state(nnx.state(axial, nnx.Param))]
     assert not any("rope_table" in p for p in param_paths)   # fixed table is a Buffer

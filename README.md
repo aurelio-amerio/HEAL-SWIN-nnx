@@ -6,7 +6,8 @@ plus the standard flat-grid Swin Transformer it shares code with. Pure
 JAX/Flax; no PyTorch import anywhere in `src/`. The port reached verified
 torch-parity (git tag `parity-verified` holds that state) and then diverged
 deliberately — both models are now Swin V2-only (cosine attention,
-post-norm) with rotary positional embeddings and seam-exact shifted windows.
+post-norm); the HEALPix model additionally defaults to rotary positional
+embeddings and seam-exact shifted windows.
 
 ## Install
 

@@ -16,7 +16,7 @@ from heal_swin_nnx.hp.windowing import get_nest_win_idcs
 # pure translations, so cross-seam content survives unmasked). False for the south
 # cap alone: all its seams are south-south (90-degree-rotated frames), every
 # cross-seam source is already claimed in-face, so all cross-seam dests are
-# backfilled and masked apart (see hp_topology.exact_shift_idcs_and_mask docstring).
+# backfilled and masked apart (see hp.topology.exact_shift_idcs_and_mask docstring).
 CONFIGS = [
     (list(range(12)), 8, 4, True),
     (list(range(12)), 8, 16, True),

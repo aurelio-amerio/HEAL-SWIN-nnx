@@ -80,6 +80,13 @@ def test_unknown_enum_values_rejected():
         HealSwinParams(nside=16, in_channels=1, out_channels=1, shift_strategy="roll")
 
 
+def test_window_size_must_be_power_of_four():
+    with pytest.raises(ValueError):
+        HealSwinParams(nside=16, in_channels=1, out_channels=1, window_size=8)
+    HealSwinParams(nside=16, in_channels=1, out_channels=1, window_size=4)
+    HealSwinParams(nside=16, in_channels=1, out_channels=1, window_size=16)
+
+
 from heal_swin_nnx.models.swin import SwinParams
 
 

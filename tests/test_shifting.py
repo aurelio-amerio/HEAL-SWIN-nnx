@@ -19,13 +19,6 @@ def test_noshift_is_identity():
     assert np.array_equal(sh.shift(x), x) and np.array_equal(sh.shift_back(x), x)
 
 
-def _grid_combos(npz):
-    for nside in (4, 8, 16):
-        for ws in (4, 16):
-            if "nest_grid/idcs/ns%d_ws%d" % (nside, ws) in npz.files:
-                yield nside, ws
-
-
 def test_nest_grid_module_roundtrip_8pix():
     sh = hps.NestGridShift(nside=16, base_pixels=list(range(8)), window_size=4)
     x = jnp.arange(1 * 2048 * 2, dtype=jnp.float32).reshape(1, 2048, 2)
@@ -36,7 +29,7 @@ def test_nest_grid_idcs_valid_permutation_matrix():
     # Brief specified [0, 4, 8] as the fourth case; substituted with [0, 1, 2, 3, 8, 9,
     # 10, 11] (north + south caps, no equatorial band) — see task-5-report.md for the
     # verified proof that [0, 4, 8] is *not* a valid permutation under the current
-    # hp_topology.derive_offset_tables fallback formula (a mixed real-edge/fallback
+    # hp.topology.derive_offset_tables fallback formula (a mixed real-edge/fallback
     # collision, not an artifact of this task's changes).
     for base_pixels in (list(range(12)), list(range(8)), [8, 9, 10, 11],
                         [0, 1, 2, 3, 8, 9, 10, 11]):

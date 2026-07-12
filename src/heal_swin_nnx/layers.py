@@ -4,8 +4,9 @@ import jax.numpy as jnp
 from flax import nnx
 
 # Distributional mirror of timm's trunc_normal_(std=0.02). (jax truncates at
-# +-2 sigma, timm at absolute +-2 — irrelevant for parity tests, which always
-# use transferred weights.)
+# +-2 sigma, timm at absolute +-2 — an init-distribution detail, not a
+# functional difference: only affects the tails of the initial parameter
+# distribution.)
 TRUNC_NORMAL = nnx.initializers.truncated_normal(stddev=0.02)
 
 

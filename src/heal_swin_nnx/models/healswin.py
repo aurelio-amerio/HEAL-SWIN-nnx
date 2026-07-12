@@ -79,8 +79,11 @@ class HealSwinParams:
         if self.patch_size <= 0 or self.patch_size % 4 != 0:
             raise ValueError("patch_size must be a positive multiple of 4 "
                              "(valid nside in deeper layers), got %d" % self.patch_size)
-        if self.window_size <= 0 or self.window_size & (self.window_size - 1):
-            raise ValueError("window_size must be a power of two, got %d" % self.window_size)
+        s = int(round(self.window_size ** 0.5))
+        if self.window_size <= 0 or s * s != self.window_size or s & (s - 1):
+            raise ValueError(
+                "window_size must be a power of four (square nested window), "
+                "got %d" % self.window_size)
         if self.nside <= 0 or self.nside & (self.nside - 1):
             raise ValueError("nside must be a power of two, got %d" % self.nside)
         if self.nside ** 2 % self.patch_size:
