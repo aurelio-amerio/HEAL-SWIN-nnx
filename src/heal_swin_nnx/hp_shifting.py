@@ -58,3 +58,138 @@ class NestRollShift(nnx.Module):
 
     def shift_back(self, x):
         return jnp.roll(x, self.shift_size, axis=1)
+
+
+# --- 8-base-pixel fisheye-subset topology (reference HEAL-SWIN). Keyed by base_pix
+# so that full-sphere tables can be added without touching traversal logic. ---
+NEST_GRID_BASE_PIX_OFFSETS_DIR1 = {8: {0: 2, 1: 2, 2: 2, 3: 6, 4: 3, 5: 3, 6: 3, 7: 3}}
+NEST_GRID_BASE_PIX_OFFSETS_DIR2 = {8: {0: 3, 1: 3, 2: 3, 3: 3, 4: 3, 5: 3, 6: 3, 7: 3}}
+NEST_GRID_MASKED_BASE_PIX = {8: [4, 5, 6, 7]}
+NEST_GRID_LEFT_CARRY_OVER_BASE_PIX = {8: [0, 1, 2, 3]}
+
+
+def _log4(x):
+    return int(math.log(x) / math.log(4))
+
+
+def _get_scale(idx, ws, base_pix_len):
+    assert idx % ws == 0
+    w_idx = idx // ws
+    scale = base_pix_len
+    while w_idx % scale != 0:
+        scale //= 4
+    return _log4(scale)
+
+
+def _get_offset_dir1(idx, ws, base_pix_len, base_pix_offsets):
+    assert idx % ws == 0
+    while True:
+        scale = _get_scale(idx, ws, base_pix_len)
+        idx -= ws * 4 ** scale
+        if scale >= _get_scale(idx, ws, base_pix_len):
+            break
+    offset = sum(ws * 4 ** power for power in range(0, scale + 1))
+    if scale == _log4(base_pix_len):
+        idx += ws * 4 ** scale
+        offset -= base_pix_len * ws
+        base_pix = idx // (base_pix_len * ws)
+        offset += base_pix_offsets[base_pix] * base_pix_len * ws
+    return offset
+
+
+def _get_offset_dir2(idx, ws, base_pix_len, base_pix_offsets):
+    assert idx % ws == 0
+    scale = _get_scale(idx, ws, base_pix_len)
+    while (idx % (ws * 4 ** (scale + 1))) // (ws * 4 ** scale) == 2:
+        idx -= 2 * ws * 4 ** scale
+        scale = _get_scale(idx, ws, base_pix_len)
+    offset = sum(2 * ws * 4 ** power for power in range(0, scale))
+    if scale == _log4(base_pix_len):
+        base_pix = idx // (base_pix_len * ws)
+        offset += base_pix_offsets[base_pix] * base_pix_len * ws
+    return offset
+
+
+def nest_grid_shift_idcs(nside, base_pix, window_size):
+    ws = window_size
+    npix = base_pix * nside ** 2
+    n_windows = npix // ws
+    base_pix_len = (npix // base_pix) // ws
+    hws, qws = ws // 2, ws // 4
+    off1 = NEST_GRID_BASE_PIX_OFFSETS_DIR1[base_pix]
+    off2 = NEST_GRID_BASE_PIX_OFFSETS_DIR2[base_pix]
+
+    dir1 = np.zeros(npix, dtype=np.int64)
+    for w in range(n_windows):
+        first = w * ws
+        os_ = _get_offset_dir1(first, ws, base_pix_len, off1)
+        dir1[first:first + hws] = np.arange(first - os_ - hws, first - os_)
+        dir1[first + hws:first + ws] = np.arange(first, first + hws)
+    dir1 %= npix
+
+    dir2 = np.zeros(npix, dtype=np.int64)
+    for w in range(n_windows):
+        first = w * ws
+        os_ = _get_offset_dir2(first, ws, base_pix_len, off2)
+        dir2[first:first + qws] = np.arange(first - os_ - hws - qws, first - os_ - hws)
+        dir2[first + qws:first + hws] = np.arange(first, first + qws)
+        dir2[first + hws:first + hws + qws] = np.arange(first - os_ - qws, first - os_)
+        dir2[first + hws + qws:first + ws] = np.arange(first + hws, first + hws + qws)
+    dir2 %= npix
+
+    result = dir1[dir2]
+    assert np.array_equal(np.sort(result), np.arange(npix)), (
+        "shift validation failed for nside=%d, window_size=%d" % (nside, ws))
+    return result
+
+
+def nest_grid_mask(nside, base_pix, window_size):
+    ws = window_size
+    hws, qws = ws // 2, ws // 4
+    npix = base_pix * nside ** 2
+    base_pix_len = (npix // base_pix) // ws
+    masked = NEST_GRID_MASKED_BASE_PIX[base_pix]
+    carry = NEST_GRID_LEFT_CARRY_OVER_BASE_PIX[base_pix]
+    mask = np.zeros(npix)
+
+    def right_mask_subset(first, size, mask_value):
+        if size == ws:
+            mask[first:first + qws] = mask_value
+            mask[first + hws:first + hws + qws] = mask_value
+        else:
+            right_mask_subset(first, size // 4, mask_value)
+            right_mask_subset(first + 2 * size // 4, size // 4, mask_value)
+
+    def left_mask_subset(first, size, mask_value):
+        if size == ws:
+            mask[first:first + hws] = mask_value
+        else:
+            left_mask_subset(first, size // 4, mask_value)
+            left_mask_subset(first + size // 4, size // 4, mask_value)
+
+    for b, co in zip(masked, carry):
+        left_mask_subset(b * base_pix_len * ws, base_pix_len * ws, b + 1)
+        right_mask_subset(b * base_pix_len * ws, base_pix_len * ws, b + 1 + len(masked))
+        first_co = co * base_pix_len * ws
+        mask[first_co:first_co + qws] = b + 1
+    return mask
+
+
+class NestGridShift(nnx.Module):
+    def __init__(self, nside, base_pix, window_size):
+        if base_pix not in NEST_GRID_BASE_PIX_OFFSETS_DIR1:
+            raise NotImplementedError(
+                "NestGridShift topology tables only exist for base_pix in %s; "
+                "full-sphere support is a planned extension (see design spec)"
+                % sorted(NEST_GRID_BASE_PIX_OFFSETS_DIR1))
+        idcs = nest_grid_shift_idcs(nside, base_pix, window_size)
+        self.shift_idcs = Buffer(jnp.asarray(idcs))
+        self.back_shift_idcs = Buffer(jnp.asarray(np.argsort(idcs)))
+        self.attn_mask = Buffer(jnp.asarray(
+            get_attn_mask_from_mask(nest_grid_mask(nside, base_pix, window_size), window_size)))
+
+    def shift(self, x):
+        return jnp.take(x, self.shift_idcs.value, axis=1)
+
+    def shift_back(self, x):
+        return jnp.take(x, self.back_shift_idcs.value, axis=1)

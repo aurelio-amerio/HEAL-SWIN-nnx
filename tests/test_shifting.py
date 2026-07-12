@@ -29,3 +29,37 @@ def test_noshift_is_identity():
     x = jnp.ones((1, 8, 2))
     assert sh.attn_mask is None
     assert np.array_equal(sh.shift(x), x) and np.array_equal(sh.shift_back(x), x)
+
+
+def _grid_combos(npz):
+    for nside in (4, 8, 16):
+        for ws in (4, 16):
+            if "nest_grid/idcs/ns%d_ws%d" % (nside, ws) in npz.files:
+                yield nside, ws
+
+
+def test_nest_grid_idcs_bit_exact():
+    npz, _ = load_case("indices")
+    for nside, ws in _grid_combos(npz):
+        tag = "ns%d_ws%d" % (nside, ws)
+        got = hps.nest_grid_shift_idcs(nside, 8, ws)
+        assert np.array_equal(got, npz["nest_grid/idcs/%s" % tag]), tag
+        assert np.array_equal(np.argsort(got), npz["nest_grid/back/%s" % tag]), tag
+
+
+def test_nest_grid_masks_bit_exact():
+    npz, _ = load_case("indices")
+    for nside, ws in _grid_combos(npz):
+        tag = "ns%d_ws%d" % (nside, ws)
+        raw = hps.nest_grid_mask(nside, 8, ws)
+        assert np.array_equal(raw, npz["nest_grid/mask_raw/%s" % tag]), tag
+        attn = hps.get_attn_mask_from_mask(raw, ws)
+        assert np.array_equal(attn, npz["nest_grid/attn_mask/%s" % tag]), tag
+
+
+def test_nest_grid_module_and_unsupported_base_pix():
+    sh = hps.NestGridShift(nside=16, base_pix=8, window_size=4)
+    x = jnp.arange(1 * 2048 * 2, dtype=jnp.float32).reshape(1, 2048, 2)
+    assert np.array_equal(sh.shift_back(sh.shift(x)), x)
+    with pytest.raises(NotImplementedError):
+        hps.NestGridShift(nside=16, base_pix=12, window_size=4)
