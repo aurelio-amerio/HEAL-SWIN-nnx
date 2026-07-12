@@ -38,6 +38,33 @@ Public API: `SwinHPTransformerSys`, `SwinHPEncoder`, `HPUnetDecoder`,
 `SwinTransformerConfig`, `DataSpec`, `Buffer` (the `nnx.Variable` subclass
 used for non-trainable index/mask state, excluded from `nnx.Param` filters).
 
+## Full sphere and partial coverage
+
+Models cover the full sphere by default (all 12 HEALPix base pixels). Experiments
+that only see part of the sky select the base pixels they cover — e.g. a
+ground-based south-pole telescope observing the four southern faces:
+
+```python
+from heal_swin_nnx import DataSpec, SwinHPTransformerConfig, SwinHPTransformerSys
+
+nside = 256
+data_spec = DataSpec(dim_in=4 * nside**2, f_in=1, f_out=1, base_pixels=[8, 9, 10, 11])
+config = SwinHPTransformerConfig(shift_strategy="nest_grid_shift_exact")
+```
+
+Inputs are the concatenation of the selected faces' NEST-ordered pixels.
+Shift strategies:
+
+- `nest_roll` — 1D roll on the NEST sequence (cheapest, coarsest).
+- `nest_grid_shift` — the reference HEAL-SWIN hierarchical grid shift; face-seam
+  windows that glue geometrically wrong edges are attention-masked.
+- `nest_grid_shift_exact` — seam-exact variant: window content crosses face seams
+  with the correct pixels and orientation wherever the two faces' local frames
+  align (all polar-to-equatorial seams). Attention masking remains at the 8 pinch
+  points, at the 90°-rotated south-south seams, and at coverage borders for
+  partial-sky models.
+- `ring_shift` — shift along HEALPix iso-latitude rings; exact on the full sphere.
+
 ## Tests
 
 ```bash

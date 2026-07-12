@@ -1,7 +1,7 @@
 # Full-Sphere HEAL-SWIN: Brainstorming Handout
 
 **Date:** 2026-07-12  
-**Status:** Pre-spec working notes — continue in fresh session
+**Status:** Superseded by 2026-07-12-full-sphere-extension-design.md (its offset derivation was verified and carried over)
 
 This document captures all numerical findings and design decisions from the brainstorming
 session so work can resume without re-derivation.
