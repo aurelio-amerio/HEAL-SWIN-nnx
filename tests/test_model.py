@@ -83,21 +83,32 @@ def test_encoder_standalone_no_decoder_params():
     assert not any("decoder" in p for path in paths for p in path)
 
 
-def test_base_pix_12_nest_roll_works_grid_mask_still_legacy():
-    model, ds = tiny_hp(base_pix=12)          # nest_roll is base_pix-agnostic
+def tiny_hp_pixels(base_pixels, strategy, nside=16):
+    cfg = SwinHPTransformerConfig(embed_dim=12, depths=[2, 2], num_heads=[2, 4],
+                                  drop_path_rate=0.0, shift_strategy=strategy)
+    ds = DataSpec(dim_in=len(base_pixels) * nside ** 2, f_in=3, f_out=5,
+                  base_pixels=base_pixels)
+    return SwinHPTransformerSys(cfg, ds, rngs=nnx.Rngs(0)), ds
+
+
+@pytest.mark.parametrize("strategy",
+                         ["nest_roll", "nest_grid_shift", "nest_grid_shift_exact",
+                          "ring_shift"])
+@pytest.mark.parametrize("base_pixels", [list(range(12)), [8, 9, 10, 11]])
+def test_forward_full_sphere_and_south_cap(base_pixels, strategy):
+    model, ds = tiny_hp_pixels(base_pixels, strategy)
     model.eval()
-    y = model(jnp.ones((1, ds.dim_in, 3)))
-    assert y.shape == (1, ds.dim_in, 5)
-    # nest_grid_mask is no longer the legacy int/8-only lookup (full-sphere-extension
-    # Task 6 derives masks geometrically via hp_topology.derive_mask_faces for any
-    # base_pixels sequence), so constructing a 12-face model with nest_grid_shift no
-    # longer raises KeyError; it builds successfully (full per-window geometric
-    # correctness of the resulting mask for base_pix=12 is a separate, still-open
-    # question — see task-6-report.md).
-    model12, ds12 = tiny_hp(base_pix=12, shift_strategy="nest_grid_shift")
-    model12.eval()
-    y12 = model12(jnp.ones((1, ds12.dim_in, 3)))
-    assert y12.shape == (1, ds12.dim_in, 5)
+    x = jax.random.normal(jax.random.key(0), (2, ds.dim_in, 3))
+    y = model(x)
+    assert y.shape == (2, ds.dim_in, 5)
+    assert np.isfinite(np.asarray(y)).all()
+
+
+def test_legacy_8pix_path_still_works():
+    model, ds = tiny_hp()  # existing helper, base_pix=8
+    model.eval()
+    x = jax.random.normal(jax.random.key(0), (1, ds.dim_in, 3))
+    assert model(x).shape == (1, ds.dim_in, 5)
 
 
 def test_no_buffer_is_a_param():

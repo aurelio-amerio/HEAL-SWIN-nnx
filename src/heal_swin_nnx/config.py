@@ -39,7 +39,8 @@ class SwinHPTransformerConfig:
     patch_size: int = 4
     window_size: int = 4
     shift_size: int = 2
-    shift_strategy: Literal["nest_roll", "nest_grid_shift", "ring_shift"] = "nest_roll"
+    shift_strategy: Literal[
+        "nest_roll", "nest_grid_shift", "nest_grid_shift_exact", "ring_shift"] = "nest_roll"
     rel_pos_bias: Optional[Literal["flat"]] = None
     embed_dim: int = 96
     patch_embed_norm_layer: Optional[Literal["layernorm"]] = None

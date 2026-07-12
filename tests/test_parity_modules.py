@@ -111,7 +111,7 @@ def test_hp_block_parity_all_shifters():
         npz, meta = load_case(case)
         m = hp.SwinTransformerBlock(
             dim=meta["dim"], input_resolution=meta["input_resolution"],
-            base_pix=meta["base_pix"], num_heads=meta["num_heads"],
+            base_pixels=list(range(meta["base_pix"])), num_heads=meta["num_heads"],
             window_size=meta["window_size"], shift_size=meta["shift_size"],
             shift_strategy=meta.get("shift_strategy", "nest_roll"), rngs=nnx.Rngs(0))
         load_torch_state(m, state_dict_of(npz))

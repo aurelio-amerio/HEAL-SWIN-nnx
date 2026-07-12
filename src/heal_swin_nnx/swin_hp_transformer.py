@@ -115,9 +115,9 @@ class FinalPatchExpand_X4(nnx.Module):
 
 
 class SwinTransformerBlock(nnx.Module):
-    def __init__(self, dim, input_resolution, base_pix, num_heads, window_size=4, shift_size=0,
-                 shift_strategy="nest_roll", rel_pos_bias=None, mlp_ratio=4.0, qkv_bias=True,
-                 qk_scale=None, drop=0.0, attn_drop=0.0, drop_path=0.0,
+    def __init__(self, dim, input_resolution, base_pixels, num_heads, window_size=4,
+                 shift_size=0, shift_strategy="nest_roll", rel_pos_bias=None, mlp_ratio=4.0,
+                 qkv_bias=True, qk_scale=None, drop=0.0, attn_drop=0.0, drop_path=0.0,
                  use_v2_norm_placement=False, use_cos_attn=False, *, rngs):
         self.input_resolution = input_resolution
         self.use_v2_norm_placement = use_v2_norm_placement
@@ -136,7 +136,7 @@ class SwinTransformerBlock(nnx.Module):
         self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
         self.mlp = Mlp(dim, int(dim * mlp_ratio), drop=drop, rngs=rngs)
 
-        nside = math.sqrt(input_resolution // base_pix)
+        nside = math.sqrt(input_resolution // len(base_pixels))
         assert nside % 1 == 0, "nside has to be an integer in every layer"
         nside = int(nside)
 
@@ -146,17 +146,14 @@ class SwinTransformerBlock(nnx.Module):
                     shift_size=self.shift_size, input_resolution=self.input_resolution,
                     window_size=self.window_size)
             elif shift_strategy == "nest_grid_shift":
-                # base_pix here is still the legacy pixel *count*; the 0..base_pix-1
-                # face-id sequence matches the reference 8-base-pixel fisheye subset.
-                # Task 6+ threads an explicit base_pixels sequence through this class.
                 self.shifter = hp_shifting.NestGridShift(
-                    nside=nside, base_pixels=list(range(base_pix)), window_size=self.window_size)
+                    nside=nside, base_pixels=base_pixels, window_size=self.window_size)
+            elif shift_strategy == "nest_grid_shift_exact":
+                self.shifter = hp_shifting.NestGridShiftExact(
+                    nside=nside, base_pixels=base_pixels, window_size=self.window_size)
             elif shift_strategy == "ring_shift":
-                # base_pix here is still the legacy pixel *count*; the 0..base_pix-1
-                # face-id sequence matches the reference 8-base-pixel fisheye subset.
-                # Task 6+ threads an explicit base_pixels sequence through this class.
                 self.shifter = hp_shifting.RingShift(
-                    nside=nside, base_pixels=list(range(base_pix)), window_size=self.window_size,
+                    nside=nside, base_pixels=base_pixels, window_size=self.window_size,
                     shift_size=self.shift_size)
             else:
                 raise ValueError("unknown shift_strategy %r" % shift_strategy)
@@ -184,11 +181,11 @@ class SwinTransformerBlock(nnx.Module):
         return x
 
 
-def _make_blocks(dim, input_resolution, base_pix, depth, num_heads, window_size, shift_size,
+def _make_blocks(dim, input_resolution, base_pixels, depth, num_heads, window_size, shift_size,
                  shift_strategy, rel_pos_bias, mlp_ratio, qkv_bias, qk_scale, drop, attn_drop,
                  drop_path, use_v2_norm_placement, use_cos_attn, rngs):
     return [SwinTransformerBlock(
-        dim=dim, input_resolution=input_resolution, base_pix=base_pix, num_heads=num_heads,
+        dim=dim, input_resolution=input_resolution, base_pixels=base_pixels, num_heads=num_heads,
         window_size=window_size, shift_size=0 if (i % 2 == 0) else shift_size,
         shift_strategy=shift_strategy, rel_pos_bias=rel_pos_bias, mlp_ratio=mlp_ratio,
         qkv_bias=qkv_bias, qk_scale=qk_scale, drop=drop, attn_drop=attn_drop,
@@ -198,12 +195,12 @@ def _make_blocks(dim, input_resolution, base_pix, depth, num_heads, window_size,
 
 
 class BasicLayer(nnx.Module):
-    def __init__(self, dim, input_resolution, depth, num_heads, window_size, base_pix,
+    def __init__(self, dim, input_resolution, depth, num_heads, window_size, base_pixels,
                  shift_size, shift_strategy, rel_pos_bias, mlp_ratio=4.0, qkv_bias=True,
                  qk_scale=None, drop=0.0, attn_drop=0.0, drop_path=0.0, downsample=False,
                  use_checkpoint=False, use_v2_norm_placement=False, use_cos_attn=False, *, rngs):
         self.use_checkpoint = use_checkpoint
-        self.blocks = nnx.List(_make_blocks(dim, input_resolution, base_pix, depth, num_heads,
+        self.blocks = nnx.List(_make_blocks(dim, input_resolution, base_pixels, depth, num_heads,
                                             window_size, shift_size, shift_strategy, rel_pos_bias,
                                             mlp_ratio, qkv_bias, qk_scale, drop, attn_drop,
                                             drop_path, use_v2_norm_placement, use_cos_attn, rngs))
@@ -221,12 +218,12 @@ class BasicLayer(nnx.Module):
 
 
 class BasicLayer_up(nnx.Module):
-    def __init__(self, dim, input_resolution, depth, num_heads, window_size, base_pix,
+    def __init__(self, dim, input_resolution, depth, num_heads, window_size, base_pixels,
                  shift_size, shift_strategy, rel_pos_bias, mlp_ratio=4.0, qkv_bias=True,
                  qk_scale=None, drop=0.0, attn_drop=0.0, drop_path=0.0, upsample=False,
                  use_checkpoint=False, use_v2_norm_placement=False, use_cos_attn=False, *, rngs):
         self.use_checkpoint = use_checkpoint
-        self.blocks = nnx.List(_make_blocks(dim, input_resolution, base_pix, depth, num_heads,
+        self.blocks = nnx.List(_make_blocks(dim, input_resolution, base_pixels, depth, num_heads,
                                             window_size, shift_size, shift_strategy, rel_pos_bias,
                                             mlp_ratio, qkv_bias, qk_scale, drop, attn_drop,
                                             drop_path, use_v2_norm_placement, use_cos_attn, rngs))
@@ -287,7 +284,7 @@ class SwinHPEncoder(nnx.Module):
                 dim=int(config.embed_dim * 2 ** i_layer),
                 input_resolution=num_patches // (4 ** i_layer),
                 depth=config.depths[i_layer], num_heads=config.num_heads[i_layer],
-                window_size=config.window_size, base_pix=data_spec.base_pix,
+                window_size=config.window_size, base_pixels=tuple(data_spec.base_pixels),
                 shift_size=config.shift_size, shift_strategy=config.shift_strategy,
                 rel_pos_bias=config.rel_pos_bias, mlp_ratio=config.mlp_ratio,
                 qkv_bias=config.qkv_bias, qk_scale=config.qk_scale,
@@ -333,7 +330,7 @@ class HPUnetDecoder(nnx.Module):
                 layers_up.append(BasicLayer_up(
                     dim=concat_out, input_resolution=num_patches // (4 ** down_idx),
                     depth=config.depths[down_idx], num_heads=config.num_heads[down_idx],
-                    window_size=config.window_size, base_pix=data_spec.base_pix,
+                    window_size=config.window_size, base_pixels=tuple(data_spec.base_pixels),
                     shift_size=config.shift_size, shift_strategy=config.shift_strategy,
                     rel_pos_bias=config.rel_pos_bias, mlp_ratio=config.mlp_ratio,
                     qkv_bias=config.qkv_bias, qk_scale=config.qk_scale,
