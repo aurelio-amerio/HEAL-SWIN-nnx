@@ -33,11 +33,12 @@ FLAT_F64_CASES = ["flat_base", "flat_cos_v2"]
 
 @pytest.fixture
 def x64():
+    prev = jax.config.jax_enable_x64
     jax.config.update("jax_enable_x64", True)
     try:
         yield
     finally:
-        jax.config.update("jax_enable_x64", False)
+        jax.config.update("jax_enable_x64", prev)
 
 
 def _to_f64(model):

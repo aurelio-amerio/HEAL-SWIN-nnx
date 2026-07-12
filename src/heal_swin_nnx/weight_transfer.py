@@ -55,6 +55,7 @@ def load_torch_state(model, sd, prefix_map=None):
         if tuple(flat[path][...].shape) != tuple(value.shape):
             raise ValueError("shape mismatch for %r: nnx %s vs torch %s"
                              % (key, flat[path][...].shape, value.shape))
+        # in-place set casts to the target param's dtype — callers doing non-float32 work must cast the model's state first (see tests/test_parity_f64.py)
         flat[path][...] = jnp.asarray(value)
         assigned.add(path)
     missing = param_paths - assigned
