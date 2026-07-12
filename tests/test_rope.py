@@ -62,3 +62,18 @@ def test_rope_logits_depend_only_on_coordinate_offset():
 
     np.testing.assert_allclose(logits(0.0, 0.0), logits(3.0, 7.0),
                                rtol=1e-4, atol=1e-5)
+
+
+def test_healswin_forward_all_pos_embeds():
+    from flax import nnx
+    from heal_swin_nnx import HealSwin, HealSwinParams
+    for pos_embed in ["none", "rel_bias", "rope_axial", "rope_mixed"]:
+        p = HealSwinParams(nside=16, in_channels=2, out_channels=3,
+                           base_pixels=(8, 9, 10, 11), embed_dim=16,
+                           depths=(2, 2), num_heads=(2, 4), drop_path_rate=0.0,
+                           pos_embed=pos_embed)
+        model = HealSwin(p, rngs=nnx.Rngs(0))
+        model.eval()
+        y = model(jnp.ones((1, p.npix, 2)))
+        assert y.shape == (1, p.npix, 3), pos_embed
+        assert np.isfinite(np.asarray(y)).all(), pos_embed

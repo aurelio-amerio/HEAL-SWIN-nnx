@@ -1,6 +1,21 @@
 """HealSwin: HEALPix-native Swin V2 U-Net (diverged from the HEAL-SWIN reference)."""
+import math
 from dataclasses import dataclass
 from typing import Literal, Optional, Sequence, Tuple, Union
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from einops import rearrange
+from flax import nnx
+
+from heal_swin_nnx.hp import shifting
+from heal_swin_nnx.hp.windowing import (
+    nest_relative_position_index, nest_win_coords, window_partition, window_reverse)
+from heal_swin_nnx.layers import (
+    LN_EPS, TRUNC_NORMAL, DropPath, Identity, Mlp, apply_rope, init_rope_freqs,
+    rope_rotation_table)
+from heal_swin_nnx.variables import Buffer
 
 POS_EMBEDS = ("none", "rel_bias", "rope_axial", "rope_mixed")
 SHIFT_STRATEGIES = ("nest_roll", "nest_grid_shift", "nest_grid_shift_exact", "ring_shift")
@@ -94,3 +109,312 @@ class HealSwinParams:
     @property
     def shift_size(self):
         return self.window_size // 2
+
+
+class WindowAttention(nnx.Module):
+    """Swin V2 window attention: cosine similarity with learned logit scale,
+    positional encoding selected by ``params.pos_embed``."""
+
+    def __init__(self, params, dim, num_heads, window_size, *, rngs):
+        self.num_heads = num_heads
+        self.pos_embed = params.pos_embed
+        head_dim = dim // num_heads
+        self.logit_scale = nnx.Param(jnp.log(10.0 * jnp.ones((num_heads, 1, 1))))
+
+        if self.pos_embed == "rel_bias":
+            s = int(round(window_size ** 0.5))
+            assert s * s == window_size, "rel_bias needs a square (power-of-4) window"
+            self.relative_position_bias_table = nnx.Param(
+                TRUNC_NORMAL(rngs.params(), ((2 * s - 1) ** 2, num_heads)))
+            self.relative_position_index = Buffer(
+                jnp.asarray(nest_relative_position_index(window_size)))
+        elif self.pos_embed in ("rope_axial", "rope_mixed"):
+            coords = jnp.asarray(nest_win_coords(window_size))  # (2, window_size)
+            if self.pos_embed == "rope_mixed":
+                self.rope_freqs = nnx.Param(init_rope_freqs(
+                    head_dim, num_heads, params.rope_theta, key=rngs.params()))
+                self.rope_coords = Buffer(coords)
+            else:
+                freqs = init_rope_freqs(head_dim, num_heads, params.rope_theta)
+                self.rope_table = Buffer(rope_rotation_table(freqs, coords[0], coords[1]))
+
+        self.qkv = nnx.Linear(dim, dim * 3, use_bias=params.qkv_bias,
+                              kernel_init=TRUNC_NORMAL, rngs=rngs)
+        self.attn_drop = nnx.Dropout(params.attn_drop_rate, rngs=rngs)
+        self.proj = nnx.Linear(dim, dim, kernel_init=TRUNC_NORMAL, rngs=rngs)
+        self.proj_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
+
+    def __call__(self, x, mask=None):
+        B_, N, C = x.shape
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads)
+        qkv = qkv.transpose(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        q = q / jnp.maximum(jnp.linalg.norm(q, axis=-1, keepdims=True), 1e-12)
+        k = k / jnp.maximum(jnp.linalg.norm(k, axis=-1, keepdims=True), 1e-12)
+        if self.pos_embed == "rope_mixed":
+            coords = self.rope_coords[...]
+            table = rope_rotation_table(self.rope_freqs[...], coords[0], coords[1])
+            q, k = apply_rope(q, k, table)
+        elif self.pos_embed == "rope_axial":
+            q, k = apply_rope(q, k, self.rope_table[...])
+        attn = q @ k.swapaxes(-2, -1)
+        logit_scale = jnp.exp(jnp.minimum(self.logit_scale[...], jnp.log(1.0 / 0.01)))
+        attn = attn * logit_scale
+
+        if self.pos_embed == "rel_bias":
+            bias = self.relative_position_bias_table[...][self.relative_position_index[...]]
+            attn = attn + bias.transpose(2, 0, 1)[None]
+
+        if mask is not None:
+            nW = mask.shape[0]
+            attn = attn.reshape(B_ // nW, nW, self.num_heads, N, N) + mask[None, :, None]
+            attn = attn.reshape(-1, self.num_heads, N, N)
+        attn = jax.nn.softmax(attn, axis=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).swapaxes(1, 2).reshape(B_, N, C)
+        return self.proj_drop(self.proj(x))
+
+
+class PatchMerging(nnx.Module):
+    def __init__(self, dim, dim_scale=2, *, rngs):
+        self.reduction = nnx.Linear(4 * dim, dim_scale * dim, use_bias=False,
+                                    kernel_init=TRUNC_NORMAL, rngs=rngs)
+        self.norm = nnx.LayerNorm(4 * dim, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x):
+        B, N, C = x.shape
+        assert N % 4 == 0, "x size %d is not divisible by 4 as necessary for patching." % N
+        x = jnp.concatenate([x[:, 0::4], x[:, 1::4], x[:, 2::4], x[:, 3::4]], axis=-1)
+        return self.reduction(self.norm(x))
+
+
+class PatchExpand(nnx.Module):
+    def __init__(self, dim, dim_scale=2, *, rngs):
+        self.expand = (nnx.Linear(dim, dim_scale * dim, use_bias=False,
+                                  kernel_init=TRUNC_NORMAL, rngs=rngs)
+                       if dim_scale != 1 else Identity())
+        self.norm = nnx.LayerNorm(dim * dim_scale // 4, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x):
+        x = self.expand(x)
+        C = x.shape[-1]
+        x = rearrange(x, "b n (p c) -> b (n p) c", p=4, c=C // 4)
+        return self.norm(x)
+
+
+class FinalPatchExpand(nnx.Module):
+    def __init__(self, patch_size, dim, *, rngs):
+        self.patch_size = patch_size
+        self.expand = nnx.Linear(dim, patch_size * dim, use_bias=False,
+                                 kernel_init=TRUNC_NORMAL, rngs=rngs)
+        self.norm = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x):
+        x = self.expand(x)
+        C = x.shape[-1]
+        x = rearrange(x, "b n (p c) -> b (n p) c", p=self.patch_size, c=C // self.patch_size)
+        return self.norm(x)
+
+
+class HealSwinBlock(nnx.Module):
+    def __init__(self, params, dim, input_resolution, num_heads, shifted, drop_path, *, rngs):
+        self.input_resolution = input_resolution
+        self.window_size = min(params.window_size, input_resolution)
+        shift_size = params.shift_size if (shifted
+                                           and input_resolution > params.window_size) else 0
+
+        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
+        self.attn = WindowAttention(params, dim, num_heads, self.window_size, rngs=rngs)
+        self.drop_path = DropPath(drop_path, rngs=rngs) if drop_path > 0.0 else Identity()
+        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
+        self.mlp = Mlp(dim, int(dim * params.mlp_ratio), drop=params.drop_rate, rngs=rngs)
+
+        nside = math.isqrt(input_resolution // len(params.base_pixels))
+        assert nside * nside * len(params.base_pixels) == input_resolution, \
+            "nside has to be an integer in every layer"
+
+        if shift_size > 0:
+            if params.shift_strategy == "nest_roll":
+                self.shifter = shifting.NestRollShift(
+                    shift_size=shift_size, input_resolution=input_resolution,
+                    window_size=self.window_size)
+            elif params.shift_strategy == "nest_grid_shift":
+                self.shifter = shifting.NestGridShift(
+                    nside=nside, base_pixels=params.base_pixels,
+                    window_size=self.window_size)
+            elif params.shift_strategy == "nest_grid_shift_exact":
+                self.shifter = shifting.NestGridShiftExact(
+                    nside=nside, base_pixels=params.base_pixels,
+                    window_size=self.window_size)
+            else:  # "ring_shift" — Params validated the enum
+                self.shifter = shifting.RingShift(
+                    nside=nside, base_pixels=params.base_pixels,
+                    window_size=self.window_size, shift_size=shift_size)
+        else:
+            self.shifter = shifting.NoShift()
+
+    def __call__(self, x):
+        shortcut = x
+        shifted_x = self.shifter.shift(x)
+        x_windows = window_partition(shifted_x, self.window_size)
+        mask = None if self.shifter.attn_mask is None else self.shifter.attn_mask[...]
+        attn_windows = self.attn(x_windows, mask=mask)
+        shifted_x = window_reverse(attn_windows, self.window_size, self.input_resolution)
+        x = self.shifter.shift_back(shifted_x)
+
+        x = shortcut + self.drop_path(self.norm1(x))
+        return x + self.drop_path(self.norm2(self.mlp(x)))
+
+
+def _make_blocks(params, dim, input_resolution, depth, num_heads, drop_path, rngs):
+    return [HealSwinBlock(params, dim, input_resolution, num_heads,
+                          shifted=(i % 2 == 1), drop_path=drop_path[i], rngs=rngs)
+            for i in range(depth)]
+
+
+class EncoderStage(nnx.Module):
+    def __init__(self, params, dim, input_resolution, depth, num_heads, drop_path,
+                 downsample, *, rngs):
+        self.use_checkpoint = params.use_checkpoint
+        self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
+                                            num_heads, drop_path, rngs))
+        self.downsample = PatchMerging(dim=dim, rngs=rngs) if downsample else None
+
+    def __call__(self, x):
+        for blk in self.blocks:
+            x = nnx.remat(type(blk).__call__)(blk, x) if self.use_checkpoint else blk(x)
+        if self.downsample is not None:
+            x = self.downsample(x)
+        return x
+
+
+class DecoderStage(nnx.Module):
+    def __init__(self, params, dim, input_resolution, depth, num_heads, drop_path,
+                 upsample, *, rngs):
+        self.use_checkpoint = params.use_checkpoint
+        self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
+                                            num_heads, drop_path, rngs))
+        self.upsample = PatchExpand(dim=dim, dim_scale=2, rngs=rngs) if upsample else None
+
+    def __call__(self, x):
+        for blk in self.blocks:
+            x = nnx.remat(type(blk).__call__)(blk, x) if self.use_checkpoint else blk(x)
+        if self.upsample is not None:
+            x = self.upsample(x)
+        return x
+
+
+class PatchEmbed(nnx.Module):
+    def __init__(self, params, *, rngs):
+        self.npix = params.npix
+        self.num_patches = params.npix // params.patch_size
+        self.proj = nnx.Conv(params.in_channels, params.embed_dim,
+                             kernel_size=(params.patch_size,), strides=(params.patch_size,),
+                             padding="VALID", rngs=rngs)
+        self.norm = (nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, rngs=rngs)
+                     if params.patch_embed_norm else None)
+
+    def __call__(self, x):  # (B, N, in_channels) channels-last
+        assert x.shape[1] == self.npix, (
+            "Input map size (%d) doesn't match model (%d)." % (x.shape[1], self.npix))
+        x = self.proj(x)
+        if self.norm is not None:
+            x = self.norm(x)
+        return x
+
+
+def _drop_path_schedule(params):
+    return [float(v) for v in np.linspace(0, params.drop_path_rate, sum(params.depths))]
+
+
+class HealSwinEncoder(nnx.Module):
+    """Compression-only backbone: patch embed + encoder stages + final norm.
+    Standalone-usable (tokenizer / embedder); allocates no decoder parameters."""
+
+    def __init__(self, params, *, rngs):
+        self.params = params
+        self.num_layers = len(params.depths)
+        self.num_features = int(params.embed_dim * 2 ** (self.num_layers - 1))
+        self.patch_embed = PatchEmbed(params, rngs=rngs)
+        self.pos_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
+
+        num_patches = self.patch_embed.num_patches
+        dpr = _drop_path_schedule(params)
+        layers = []
+        for i in range(self.num_layers):
+            layers.append(EncoderStage(
+                params, dim=int(params.embed_dim * 2 ** i),
+                input_resolution=num_patches // 4 ** i,
+                depth=params.depths[i], num_heads=params.num_heads[i],
+                drop_path=dpr[sum(params.depths[:i]):sum(params.depths[:i + 1])],
+                downsample=i < self.num_layers - 1, rngs=rngs))
+        self.layers = nnx.List(layers)
+        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x):
+        x = self.patch_embed(x)
+        x = self.pos_drop(x)
+        skips = []
+        for layer in self.layers:
+            skips.append(x)
+            x = layer(x)
+        return self.norm(x), skips
+
+
+class HealSwinDecoder(nnx.Module):
+    """UNet decoder head producing dense per-pixel outputs."""
+
+    def __init__(self, params, *, rngs):
+        self.num_layers = len(params.depths)
+        num_patches = params.npix // params.patch_size
+        dpr = _drop_path_schedule(params)
+        layers_up = []
+        concat_back_dim = []
+        for i_layer in range(self.num_layers):
+            down_idx = self.num_layers - 1 - i_layer
+            dim = int(params.embed_dim * 2 ** down_idx)
+            concat_back_dim.append(
+                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL, rngs=rngs)
+                if i_layer > 0 else Identity())
+            if i_layer == 0:
+                layers_up.append(PatchExpand(dim=dim, dim_scale=2, rngs=rngs))
+            else:
+                layers_up.append(DecoderStage(
+                    params, dim=dim, input_resolution=num_patches // 4 ** down_idx,
+                    depth=params.depths[down_idx], num_heads=params.num_heads[down_idx],
+                    drop_path=dpr[sum(params.depths[:down_idx]):
+                                  sum(params.depths[:down_idx + 1])],
+                    upsample=down_idx > 0, rngs=rngs))
+        self.layers_up = nnx.List(layers_up)
+        self.concat_back_dim = nnx.List(concat_back_dim)
+        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, rngs=rngs)
+        self.up = FinalPatchExpand(patch_size=params.patch_size, dim=params.embed_dim,
+                                   rngs=rngs)
+        self.output = nnx.Conv(params.embed_dim, params.out_channels, kernel_size=(1,),
+                               use_bias=False, rngs=rngs)
+
+    def __call__(self, x, skips):
+        for inx, layer_up in enumerate(self.layers_up):
+            if inx == 0:
+                x = layer_up(x)
+            else:
+                x = jnp.concatenate([x, skips[self.num_layers - 1 - inx]], axis=-1)
+                x = self.concat_back_dim[inx](x)
+                x = layer_up(x)
+        x = self.norm_up(x)
+        x = self.up(x)
+        return self.output(x)  # (B, npix, out_channels) channels-last
+
+
+class HealSwin(nnx.Module):
+    """HEALPix Swin V2 U-Net: HealSwinEncoder + HealSwinDecoder."""
+
+    def __init__(self, params, *, rngs):
+        self.encoder = HealSwinEncoder(params, rngs=rngs)
+        self.decoder = HealSwinDecoder(params, rngs=rngs)
+
+    def __call__(self, x):
+        tokens, skips = self.encoder(x)
+        return self.decoder(tokens, skips)
