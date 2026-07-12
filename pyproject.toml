@@ -1,0 +1,13 @@
+[project]
+name = "heal-swin-nnx"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "einops>=0.8.2",
+    "flax>=0.12.7",
+    "healpy>=1.19.0",
+    "jax[cuda12]>=0.10.2",
+    "numpy>=2.5.1",
+]
