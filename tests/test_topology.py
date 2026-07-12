@@ -2,7 +2,7 @@ import healpy as hp
 import numpy as np
 import pytest
 
-from heal_swin_nnx import hp_topology as hpt
+from heal_swin_nnx.hp import topology as hpt
 
 
 @pytest.mark.parametrize("nside", [1, 2, 4, 8, 16])
@@ -73,7 +73,7 @@ def test_derive_offset_tables_south_cap():
 
 
 def test_derive_mask_faces_reproduces_reference_8pix():
-    from heal_swin_nnx.hp_shifting import nest_grid_shift_idcs
+    from heal_swin_nnx.hp.shifting import nest_grid_shift_idcs
     base_pixels, nside, ws = list(range(8)), 16, 4
     idcs = nest_grid_shift_idcs(nside, base_pixels, ws)
     masked, carry = hpt.derive_mask_faces(base_pixels, nside, ws, idcs)

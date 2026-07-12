@@ -1,8 +1,8 @@
 import jax.numpy as jnp
 import numpy as np
 
-from heal_swin_nnx import hp_shifting as hps
-from heal_swin_nnx import hp_topology as hpt
+from heal_swin_nnx.hp import shifting as hps
+from heal_swin_nnx.hp import topology as hpt
 
 
 def test_nest_roll_shift_roundtrip():
@@ -69,7 +69,7 @@ def test_nest_grid_module_roundtrip_full_sphere_and_subsets():
 
 
 def _slot_grid(ws):
-    from heal_swin_nnx.hp_windowing import get_nest_win_idcs
+    from heal_swin_nnx.hp.windowing import get_nest_win_idcs
     return get_nest_win_idcs(ws)
 
 

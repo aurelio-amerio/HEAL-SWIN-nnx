@@ -8,8 +8,8 @@ import healpy as hp
 import numpy as np
 import pytest
 
-from heal_swin_nnx import hp_topology as hpt
-from heal_swin_nnx.hp_windowing import get_nest_win_idcs
+from heal_swin_nnx.hp import topology as hpt
+from heal_swin_nnx.hp.windowing import get_nest_win_idcs
 
 # expect_cross_face: whether any unmasked cross-face slot pair can survive.
 # True for full-sphere configs (north->equatorial and equatorial->south seams are

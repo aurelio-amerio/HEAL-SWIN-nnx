@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
-from heal_swin_nnx import hp_topology
+from heal_swin_nnx.hp import topology as hp_topology
 from heal_swin_nnx.variables import Buffer
 
 

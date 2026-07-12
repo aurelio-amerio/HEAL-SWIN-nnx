@@ -178,7 +178,7 @@ def _window_slot_grid_ok(base_pixels, nside, window_size, local_sources):
     write of nest_grid_mask can re-label: a bad glue there is repaired by the
     carry label (which separates those slots from the rest of the window in
     the attention mask), so it does not force masking the whole face."""
-    from heal_swin_nnx.hp_windowing import get_nest_win_idcs
+    from heal_swin_nnx.hp.windowing import get_nest_win_idcs
     grid = get_nest_win_idcs(window_size)
     s = grid.shape[0]
     qws = window_size // 4
@@ -248,7 +248,7 @@ def derive_ring_lost_from(base_pixels):
 def _window_components(base_pixels, nside, window_size, local_sources, backfilled):
     """Label window slots by sky-contiguity (union-find over canonically
     adjacent, sky-adjacent slot pairs); each backfilled slot is its own label."""
-    from heal_swin_nnx.hp_windowing import get_nest_win_idcs
+    from heal_swin_nnx.hp.windowing import get_nest_win_idcs
     grid = get_nest_win_idcs(window_size)
     s = grid.shape[0]
     glob = local_to_global(base_pixels, nside, np.asarray(local_sources))

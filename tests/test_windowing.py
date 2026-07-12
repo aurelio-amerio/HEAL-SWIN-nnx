@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import numpy as np
 
-from heal_swin_nnx.hp_windowing import (
+from heal_swin_nnx.hp.windowing import (
     get_nest_win_idcs, nest_relative_position_index, window_partition, window_reverse)
 
 

@@ -7,9 +7,9 @@ import numpy as np
 from einops import rearrange
 from flax import nnx
 
-from heal_swin_nnx import hp_shifting
+from heal_swin_nnx.hp import shifting as hp_shifting
 from heal_swin_nnx.config import DataSpec, SwinHPTransformerConfig
-from heal_swin_nnx.hp_windowing import (
+from heal_swin_nnx.hp.windowing import (
     nest_relative_position_index, window_partition, window_reverse)
 from heal_swin_nnx.layers import TRUNC_NORMAL, DropPath, Identity, Mlp
 from heal_swin_nnx.variables import Buffer
