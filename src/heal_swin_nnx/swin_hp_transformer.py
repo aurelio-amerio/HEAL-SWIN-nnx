@@ -197,10 +197,10 @@ class BasicLayer(nnx.Module):
                  qk_scale=None, drop=0.0, attn_drop=0.0, drop_path=0.0, downsample=False,
                  use_checkpoint=False, use_v2_norm_placement=False, use_cos_attn=False, *, rngs):
         self.use_checkpoint = use_checkpoint
-        self.blocks = _make_blocks(dim, input_resolution, base_pix, depth, num_heads,
-                                   window_size, shift_size, shift_strategy, rel_pos_bias,
-                                   mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path,
-                                   use_v2_norm_placement, use_cos_attn, rngs)
+        self.blocks = nnx.List(_make_blocks(dim, input_resolution, base_pix, depth, num_heads,
+                                            window_size, shift_size, shift_strategy, rel_pos_bias,
+                                            mlp_ratio, qkv_bias, qk_scale, drop, attn_drop,
+                                            drop_path, use_v2_norm_placement, use_cos_attn, rngs))
         self.downsample = PatchMerging(dim=dim, rngs=rngs) if downsample else None
 
     def __call__(self, x):
@@ -220,10 +220,10 @@ class BasicLayer_up(nnx.Module):
                  qk_scale=None, drop=0.0, attn_drop=0.0, drop_path=0.0, upsample=False,
                  use_checkpoint=False, use_v2_norm_placement=False, use_cos_attn=False, *, rngs):
         self.use_checkpoint = use_checkpoint
-        self.blocks = _make_blocks(dim, input_resolution, base_pix, depth, num_heads,
-                                   window_size, shift_size, shift_strategy, rel_pos_bias,
-                                   mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path,
-                                   use_v2_norm_placement, use_cos_attn, rngs)
+        self.blocks = nnx.List(_make_blocks(dim, input_resolution, base_pix, depth, num_heads,
+                                            window_size, shift_size, shift_strategy, rel_pos_bias,
+                                            mlp_ratio, qkv_bias, qk_scale, drop, attn_drop,
+                                            drop_path, use_v2_norm_placement, use_cos_attn, rngs))
         self.upsample = PatchExpand(dim=dim, dim_scale=2, rngs=rngs) if upsample else None
 
     def __call__(self, x):
@@ -235,3 +235,137 @@ class BasicLayer_up(nnx.Module):
         if self.upsample is not None:
             x = self.upsample(x)
         return x
+
+
+class PatchEmbed(nnx.Module):
+    def __init__(self, config, data_spec, *, rngs):
+        assert config.patch_size % 4 == 0, "required for valid nside in deeper layers"
+        self.dim_in = data_spec.dim_in
+        self.num_patches = data_spec.dim_in // config.patch_size
+        self.proj = nnx.Conv(data_spec.f_in, config.embed_dim,
+                             kernel_size=(config.patch_size,), strides=(config.patch_size,),
+                             padding="VALID", rngs=rngs)
+        self.norm = (nnx.LayerNorm(config.embed_dim, epsilon=LN_EPS, rngs=rngs)
+                     if config.patch_embed_norm_layer == "layernorm" else None)
+
+    def __call__(self, x):  # (B, N, f_in) channels-last
+        assert x.shape[1] == self.dim_in, (
+            "Input image size (%d) doesn't match model (%d)." % (x.shape[1], self.dim_in))
+        x = self.proj(x)
+        if self.norm is not None:
+            x = self.norm(x)
+        return x
+
+
+class SwinHPEncoder(nnx.Module):
+    """Compression-only backbone: patch embed + APE + encoder stages + final norm.
+    Standalone-usable (tokenizer / embedder); allocates no decoder parameters."""
+
+    def __init__(self, config: SwinHPTransformerConfig, data_spec: DataSpec, *, rngs):
+        self.config = config
+        self.num_layers = len(config.depths)
+        self.num_features = int(config.embed_dim * 2 ** (self.num_layers - 1))
+        self.patch_embed = PatchEmbed(config, data_spec, rngs=rngs)
+        num_patches = self.patch_embed.num_patches
+        if config.ape:
+            self.absolute_pos_embed = nnx.Param(
+                TRUNC_NORMAL(rngs.params(), (1, num_patches, config.embed_dim)))
+        else:
+            self.absolute_pos_embed = None
+        self.pos_drop = nnx.Dropout(config.drop_rate, rngs=rngs)
+
+        dpr = [float(v) for v in np.linspace(0, config.drop_path_rate, sum(config.depths))]
+        layers = []
+        for i_layer in range(self.num_layers):
+            layers.append(BasicLayer(
+                dim=int(config.embed_dim * 2 ** i_layer),
+                input_resolution=num_patches // (4 ** i_layer),
+                depth=config.depths[i_layer], num_heads=config.num_heads[i_layer],
+                window_size=config.window_size, base_pix=data_spec.base_pix,
+                shift_size=config.shift_size, shift_strategy=config.shift_strategy,
+                rel_pos_bias=config.rel_pos_bias, mlp_ratio=config.mlp_ratio,
+                qkv_bias=config.qkv_bias, qk_scale=config.qk_scale,
+                use_cos_attn=config.use_cos_attn, drop=config.drop_rate,
+                attn_drop=config.attn_drop_rate,
+                drop_path=dpr[sum(config.depths[:i_layer]):sum(config.depths[:i_layer + 1])],
+                use_v2_norm_placement=config.use_v2_norm_placement,
+                downsample=i_layer < self.num_layers - 1,
+                use_checkpoint=config.use_checkpoint, rngs=rngs))
+        self.layers = nnx.List(layers)
+        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x):
+        x = self.patch_embed(x)
+        if self.absolute_pos_embed is not None:
+            x = x + self.absolute_pos_embed.value
+        x = self.pos_drop(x)
+        skips = []
+        for layer in self.layers:
+            skips.append(x)
+            x = layer(x)
+        return self.norm(x), skips
+
+
+class HPUnetDecoder(nnx.Module):
+    """UNet decoder head (dense per-pixel outputs). Named UnetDecoder in the reference."""
+
+    def __init__(self, config: SwinHPTransformerConfig, data_spec: DataSpec, *, rngs):
+        self.num_layers = len(config.depths)
+        num_patches = data_spec.dim_in // config.patch_size
+        dpr = [float(v) for v in np.linspace(0, config.drop_path_rate, sum(config.depths))]
+        layers_up = []
+        concat_back_dim = []
+        for i_layer in range(self.num_layers):
+            down_idx = self.num_layers - 1 - i_layer
+            concat_out = int(config.embed_dim * 2 ** down_idx)
+            concat_back_dim.append(
+                nnx.Linear(2 * concat_out, concat_out, kernel_init=TRUNC_NORMAL, rngs=rngs)
+                if i_layer > 0 else Identity())
+            if i_layer == 0:
+                layers_up.append(PatchExpand(dim=concat_out, dim_scale=2, rngs=rngs))
+            else:
+                layers_up.append(BasicLayer_up(
+                    dim=concat_out, input_resolution=num_patches // (4 ** down_idx),
+                    depth=config.depths[down_idx], num_heads=config.num_heads[down_idx],
+                    window_size=config.window_size, base_pix=data_spec.base_pix,
+                    shift_size=config.shift_size, shift_strategy=config.shift_strategy,
+                    rel_pos_bias=config.rel_pos_bias, mlp_ratio=config.mlp_ratio,
+                    qkv_bias=config.qkv_bias, qk_scale=config.qk_scale,
+                    use_cos_attn=config.use_cos_attn, drop=config.drop_rate,
+                    attn_drop=config.attn_drop_rate,
+                    drop_path=dpr[sum(config.depths[:down_idx]):sum(config.depths[:down_idx + 1])],
+                    use_v2_norm_placement=config.use_v2_norm_placement,
+                    upsample=down_idx > 0, use_checkpoint=config.use_checkpoint, rngs=rngs))
+        self.layers_up = nnx.List(layers_up)
+        self.concat_back_dim = nnx.List(concat_back_dim)
+        self.up = FinalPatchExpand_X4(patch_size=config.patch_size, dim=config.embed_dim,
+                                      rngs=rngs)
+        self.output = nnx.Conv(config.embed_dim, data_spec.f_out, kernel_size=(1,),
+                               use_bias=False, rngs=rngs)
+        self.norm_up = nnx.LayerNorm(config.embed_dim, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x, skips, return_intermediates=False):
+        intermediates = []
+        for inx, layer_up in enumerate(self.layers_up):
+            if inx == 0:
+                x = layer_up(x)
+            else:
+                x = jnp.concatenate([x, skips[self.num_layers - 1 - inx]], axis=-1)
+                x = self.concat_back_dim[inx](x)
+                x = layer_up(x)
+            if return_intermediates:
+                intermediates.append(x)
+        x = self.norm_up(x)
+        x = self.up(x)
+        x = self.output(x)  # (B, N, f_out) channels-last
+        return (x, intermediates) if return_intermediates else x
+
+
+class SwinHPTransformerSys(nnx.Module):
+    def __init__(self, config: SwinHPTransformerConfig, data_spec: DataSpec, *, rngs):
+        self.encoder = SwinHPEncoder(config, data_spec, rngs=rngs)
+        self.decoder = HPUnetDecoder(config, data_spec, rngs=rngs)
+
+    def __call__(self, x):
+        tokens, skips = self.encoder(x)
+        return self.decoder(tokens, skips)

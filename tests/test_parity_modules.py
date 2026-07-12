@@ -127,3 +127,18 @@ def test_hp_block_parity_all_shifters():
         check_param_grads(gp, grads_of(npz), tol=dict(rtol=1e-4, atol=1e-5))
         if "sd/attn_mask" in npz.files:  # block-level buffer parity, bit-exact
             assert np.array_equal(np.asarray(m.shifter.attn_mask.value), npz["sd/attn_mask"])
+
+
+from heal_swin_nnx.config import DataSpec, SwinHPTransformerConfig
+
+
+def test_hp_patch_embed_parity():
+    npz, meta = load_case("leaf_hp_patch_embed")
+    cfg = SwinHPTransformerConfig(patch_size=meta["patch_size"], embed_dim=meta["embed_dim"],
+                                  depths=[2, 2], num_heads=[2, 4], drop_path_rate=0.0)
+    ds = DataSpec(dim_in=meta["dim_in"], f_in=meta["f_in"], f_out=5, base_pix=8)
+    m = hp.PatchEmbed(cfg, ds, rngs=nnx.Rngs(0))
+    load_torch_state(m, state_dict_of(npz))
+    m.eval()
+    x = jnp.asarray(npz["input"]).transpose(0, 2, 1)  # torch (B,C,N) -> nnx (B,N,C)
+    np.testing.assert_allclose(np.asarray(m(x)), npz["output"], **FWD)
