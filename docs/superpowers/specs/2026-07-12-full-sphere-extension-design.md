@@ -212,15 +212,15 @@ sphere the attention mask is nonzero only at pinch-corner windows. Mask construc
 geometric labelling on just the affected windows: pixels grouped by sky-contiguity,
 backfilled slots get a unique label.
 
-**Efficiency.** All geometry is construction-time; the runtime op is the identical single
-`jnp.take` gather the approximate strategy uses — no padding tensor, no scatter, zero
-extra runtime cost (this is what distinguishes it from Map2Patches' `PatchPadding`, which
-pays a gather/scatter per forward pass). Construction must be **vectorized numpy over all
-pixels** (no per-pixel Python loop à la Map2Patches' `get_diag_indices`): the shift is
-`s/2 <= nside`, so each pixel crosses at most one face boundary — compute `x+d, y+d` for
-all pixels at once, classify into 9 cases (interior / 4 edges / 4 corners), apply each
-case's fixed transform as a batched array op. O(npix) once per resolution stage
-(~milliseconds at nside=256 full sphere).
+**Efficiency.** The hard requirement is the forward path: the runtime op is the identical
+single `jnp.take` gather the approximate strategy uses — no padding tensor, no scatter,
+zero extra runtime cost (this is what distinguishes it from Map2Patches' `PatchPadding`,
+which pays a gather/scatter per forward pass). Index construction is one-off per model
+build and is **allowed to be slow in favour of clarity** — a readable per-pixel loop is
+fine if it is more idiomatic than batched case transforms. Useful structural fact either
+way: the shift is `s/2 <= nside`, so each pixel crosses at most one face boundary — the
+walk is a bounded 9-case classification (interior / 4 edges / 4 corners), never an
+iterative search.
 
 Residual approximations (documented, not fixable by indexing):
 
