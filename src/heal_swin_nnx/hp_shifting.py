@@ -189,10 +189,10 @@ class NestGridShift(nnx.Module):
             get_attn_mask_from_mask(nest_grid_mask(nside, base_pix, window_size), window_size)))
 
     def shift(self, x):
-        return jnp.take(x, self.shift_idcs.value, axis=1)
+        return jnp.take(x, self.shift_idcs[...], axis=1)
 
     def shift_back(self, x):
-        return jnp.take(x, self.back_shift_idcs.value, axis=1)
+        return jnp.take(x, self.back_shift_idcs[...], axis=1)
 
 
 # --- ring topology (healpy ring coordinate, cross-base-pixel wrapping) ---
@@ -226,6 +226,9 @@ def ring_shift_idcs_and_mask(nside, base_pix, window_size, shift_size):
     for i in range(base_pix):
         lost_pix.append(np.setdiff1d(np.arange(i * pixel_size, (i + 1) * pixel_size), result))
 
+    # base pixels 4..7 are the masked/backfilled subset, 0..3 carry over unchanged; this is the
+    # 8-base-pixel subset topology guarded by the NotImplementedError above. Full-sphere (phase 2)
+    # must derive these ranges from the topology tables instead of hardcoding them.
     unused_source_pix = []
     for i in range(4, base_pix):
         subset_slice = slice(i * pixel_size, (i + 1) * pixel_size)
@@ -240,6 +243,8 @@ def ring_shift_idcs_and_mask(nside, base_pix, window_size, shift_size):
 
     assert unused_pix.shape[0] == (result > max_idx).sum(), (
         "the number of unused source pixels does not match the number of pixels to be filled")
+    # Same 8-base-pixel subset topology as above: only base pixels 0..3 receive the leftover
+    # unused source pixels. Full-sphere (phase 2) must derive this range from the topology tables.
     first = 0
     for i in range(4):
         subset_slice = slice(i * pixel_size, (i + 1) * pixel_size)
@@ -268,7 +273,7 @@ class RingShift(nnx.Module):
         self.attn_mask = Buffer(jnp.asarray(get_attn_mask_from_mask(raw_mask, window_size)))
 
     def shift(self, x):
-        return jnp.take(x, self.shift_idcs.value, axis=1)
+        return jnp.take(x, self.shift_idcs[...], axis=1)
 
     def shift_back(self, x):
-        return jnp.take(x, self.back_shift_idcs.value, axis=1)
+        return jnp.take(x, self.back_shift_idcs[...], axis=1)

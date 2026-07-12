@@ -5,11 +5,8 @@ import pytest
 from flax import nnx
 
 from heal_swin_nnx import (
-    Buffer, DataSpec, HPUnetDecoder, SwinHPEncoder, SwinHPTransformerConfig,
-    SwinHPTransformerSys)
-from heal_swin_nnx import hp_shifting as hps
+    DataSpec, SwinHPEncoder, SwinHPTransformerConfig, SwinHPTransformerSys)
 from heal_swin_nnx.layers import DropPath, Identity, Mlp
-from heal_swin_nnx.variables import Buffer as BufferDirect
 
 
 def test_identity():
@@ -82,7 +79,7 @@ def test_encoder_standalone_no_decoder_params():
     tokens, skips = enc(jnp.ones((1, 2048, 3)))
     assert tokens.shape == (1, 2048 // 4 // 4, 24)   # N/(patch*4^(L-1)), embed*2^(L-1)
     assert len(skips) == 2
-    paths = [tuple(str(p) for p in path) for path, _ in nnx.state(enc, nnx.Param).flat_state()]
+    paths = [tuple(str(p) for p in path) for path, _ in nnx.to_flat_state(nnx.state(enc, nnx.Param))]
     assert not any("decoder" in p for path in paths for p in path)
 
 
@@ -97,7 +94,7 @@ def test_base_pix_12_nest_roll_works_grid_raises():
 
 def test_no_buffer_is_a_param():
     model, _ = tiny_hp(rel_pos_bias="flat")
-    params = dict(nnx.state(model, nnx.Param).flat_state())
+    params = dict(nnx.to_flat_state(nnx.state(model, nnx.Param)))
     for path in params:
         joined = "/".join(str(p) for p in path)
         assert "attn_mask" not in joined and "relative_position_index" not in joined

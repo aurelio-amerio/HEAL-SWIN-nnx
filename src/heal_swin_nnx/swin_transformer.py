@@ -74,15 +74,15 @@ class WindowAttention(nnx.Module):
             qn = q / jnp.maximum(jnp.linalg.norm(q, axis=-1, keepdims=True), 1e-12)
             kn = k / jnp.maximum(jnp.linalg.norm(k, axis=-1, keepdims=True), 1e-12)
             attn = qn @ kn.swapaxes(-2, -1)
-            logit_scale = jnp.exp(jnp.minimum(self.logit_scale.value, jnp.log(1.0 / 0.01)))
+            logit_scale = jnp.exp(jnp.minimum(self.logit_scale[...], jnp.log(1.0 / 0.01)))
             attn = attn * logit_scale
         else:
             attn = (q * self.scale) @ k.swapaxes(-2, -1)
 
         if self.use_rel_pos_bias:
             ws_area = self.window_size[0] * self.window_size[1]
-            bias = self.relative_position_bias_table.value[
-                self.relative_position_index.value.reshape(-1)].reshape(ws_area, ws_area, -1)
+            bias = self.relative_position_bias_table[...][
+                self.relative_position_index[...].reshape(-1)].reshape(ws_area, ws_area, -1)
             attn = attn + bias.transpose(2, 0, 1)[None]
 
         if mask is not None:
@@ -163,7 +163,7 @@ class SwinTransformerBlock(nnx.Module):
 
         x_windows = window_partition(shifted_x, self.window_size)
         x_windows = x_windows.reshape(-1, self.window_size[0] * self.window_size[1], C)
-        mask = None if self.attn_mask is None else self.attn_mask.value
+        mask = None if self.attn_mask is None else self.attn_mask[...]
         attn_windows = self.attn(x_windows, mask=mask)
         attn_windows = attn_windows.reshape(-1, self.window_size[0], self.window_size[1], C)
         shifted_x = window_reverse(attn_windows, self.window_size, H, W)
@@ -367,7 +367,7 @@ class SwinEncoder(nnx.Module):
     def __call__(self, x):
         x = self.patch_embed(x)
         if self.absolute_pos_embed is not None:
-            x = x + self.absolute_pos_embed.value
+            x = x + self.absolute_pos_embed[...]
         x = self.pos_drop(x)
         skips = []
         for layer in self.layers:

@@ -42,9 +42,8 @@ def transform_array(arr, renamed_leaf):
 
 def load_torch_state(model, sd, prefix_map=None):
     state = nnx.state(model)
-    flat = dict(state.flat_state())
-    param_paths = {path for path, v in flat.items() if isinstance(v, nnx.VariableState)
-                   and v.type is nnx.Param}
+    flat = dict(nnx.to_flat_state(state))
+    param_paths = {path for path, v in flat.items() if isinstance(v, nnx.Param)}
     assigned = set()
     for key, arr in sd.items():
         if key.endswith(SKIP_SUFFIXES):
@@ -53,12 +52,12 @@ def load_torch_state(model, sd, prefix_map=None):
         if path not in flat:
             raise ValueError("torch key %r maps to %r which is not in the nnx state" % (key, path))
         value = transform_array(np.asarray(arr), path[-1])
-        if tuple(flat[path].value.shape) != tuple(value.shape):
+        if tuple(flat[path][...].shape) != tuple(value.shape):
             raise ValueError("shape mismatch for %r: nnx %s vs torch %s"
-                             % (key, flat[path].value.shape, value.shape))
-        flat[path].value = jnp.asarray(value)
+                             % (key, flat[path][...].shape, value.shape))
+        flat[path][...] = jnp.asarray(value)
         assigned.add(path)
     missing = param_paths - assigned
     if missing:
         raise ValueError("nnx Params not assigned by transfer: %s" % sorted(missing))
-    nnx.update(model, nnx.State.from_flat_path(flat))
+    nnx.update(model, nnx.from_flat_state(flat))

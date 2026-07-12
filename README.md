@@ -60,8 +60,9 @@ Golden fixtures (`tests/goldens/*.npz`) are generated once from the pinned
 legacy reference environment (Python 3.8, torch 1.8.0+cpu, timm 0.4.12,
 healpy 1.15.2) and committed; the main test suite only reads them, it never
 needs torch. Forward outputs match to `rtol=atol=1e-4`; gradients to
-`rtol=1e-3, atol=1e-4` (two ill-conditioned float32 cases are documented and
-individually loosened in `tests/test_parity_e2e.py`). See
+`rtol=1e-3, atol=1e-4` (three ill-conditioned float32 cases — `hp_ring`,
+`hp_cos_v2`, `flat_cos_v2` — are documented and individually loosened in
+`tests/test_parity_e2e.py`). See
 [`parity/README.md`](parity/README.md) for how the fixtures are (re)generated
 and the reference clamp-bug patch that generation requires.
 

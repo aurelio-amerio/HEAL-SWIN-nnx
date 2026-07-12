@@ -5,7 +5,7 @@ build-backend = "uv_build"
 [project]
 name = "heal-swin-nnx"
 version = "0.1.0"
-description = "Add your description here"
+description = "JAX/Flax NNX port of HEAL-SWIN (spherical HEALPix SWIN-UNet) with golden-value parity against the PyTorch reference"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

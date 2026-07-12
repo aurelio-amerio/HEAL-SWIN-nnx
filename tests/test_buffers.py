@@ -17,7 +17,7 @@ class Toy(nnx.Module):
 def test_buffer_excluded_from_params():
     m = Toy()
     params = nnx.state(m, nnx.Param)
-    flat = dict(params.flat_state())
+    flat = dict(nnx.to_flat_state(params))
     assert ("w",) in flat
     assert not any("idx" in path for path in flat)
 
@@ -25,7 +25,7 @@ def test_buffer_excluded_from_params():
 def test_buffer_not_differentiated():
     m = Toy()
     grads = nnx.grad(lambda m: m())(m)  # default wrt=nnx.Param
-    flat = dict(grads.flat_state())
+    flat = dict(nnx.to_flat_state(grads))
     assert ("w",) in flat
     assert not any("idx" in path for path in flat)
 

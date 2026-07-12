@@ -8,17 +8,19 @@ from heal_swin_nnx.weight_transfer import load_torch_state, torch_key_to_path, t
 from tests.parity_utils import grads_of, load_case, state_dict_of
 
 FWD = dict(rtol=1e-5, atol=1e-6)
+# plan-prescribed gradient tolerance; grads accumulate one extra backward pass of float32
+# noise vs forward, hence 10x rtol headroom over the global leaf constraint (1e-5).
 GRD = dict(rtol=1e-4, atol=1e-6)
 
 
 def check_param_grads(nnx_grads, torch_grads, prefix_map=None, tol=None):
     tol = GRD if tol is None else tol
-    flat = {tuple(str(p) for p in path): v for path, v in nnx_grads.flat_state()}
+    flat = {tuple(str(p) for p in path): v for path, v in nnx.to_flat_state(nnx_grads)}
     for tkey, tgrad in torch_grads.items():
         path = tuple(str(p) for p in torch_key_to_path(tkey, prefix_map))
         leaf = path[-1]
         expected = transform_array(tgrad, leaf)
-        got = np.asarray(flat[path].value)
+        got = np.asarray(flat[path][...])
         np.testing.assert_allclose(got, expected, err_msg=tkey, **tol)
 
 
@@ -76,7 +78,7 @@ def test_hp_rel_pos_index_buffer_matches_reference():
     npz, _ = load_case("leaf_hp_attn_relbias")
     m = hp.WindowAttention(dim=12, window_size=4, num_heads=2, rel_pos_bias="flat",
                            rngs=nnx.Rngs(0))
-    assert np.array_equal(np.asarray(m.relative_position_index.value),
+    assert np.array_equal(np.asarray(m.relative_position_index[...]),
                           npz["sd/relative_position_index"])
 
 
@@ -126,7 +128,7 @@ def test_hp_block_parity_all_shifters():
         # are O(1e-2..1e3), far above this floor
         check_param_grads(gp, grads_of(npz), tol=dict(rtol=1e-4, atol=1e-5))
         if "sd/attn_mask" in npz.files:  # block-level buffer parity, bit-exact
-            assert np.array_equal(np.asarray(m.shifter.attn_mask.value), npz["sd/attn_mask"])
+            assert np.array_equal(np.asarray(m.shifter.attn_mask[...]), npz["sd/attn_mask"])
 
 
 from heal_swin_nnx.config import DataSpec, SwinHPTransformerConfig

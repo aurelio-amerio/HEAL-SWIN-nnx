@@ -84,11 +84,11 @@ def test_hp_e2e_gradient_parity(case):
     np.testing.assert_allclose(np.asarray(gx).transpose(0, 2, 1), npz["input_grad"], **tol)
 
     gp = nnx.grad(lambda m: m(x).sum())(model)
-    flat = {tuple(str(p) for p in path): v for path, v in gp.flat_state()}
+    flat = {tuple(str(p) for p in path): v for path, v in nnx.to_flat_state(gp)}
     for tkey, tgrad in grads_of(npz).items():
         path = tuple(str(p) for p in torch_key_to_path(tkey, HP_PREFIX_MAP))
         expected = transform_array(tgrad, path[-1])
-        np.testing.assert_allclose(np.asarray(flat[path].value), expected,
+        np.testing.assert_allclose(np.asarray(flat[path][...]), expected,
                                    err_msg=tkey, **tol)
 
 
@@ -107,7 +107,7 @@ def test_hp_buffer_bit_parity(case):
         leaf = parts[-1]
         ours = (obj.shifter.attn_mask if leaf == "attn_mask" else
                 getattr(obj, leaf))
-        assert np.array_equal(np.asarray(ours.value), npz["sd/" + key]), key
+        assert np.array_equal(np.asarray(ours[...]), npz["sd/" + key]), key
 
 
 FLAT_CASES = ["flat_base", "flat_cos_v2", "flat_norelbias", "flat_nomask", "flat_ape"]
@@ -163,9 +163,9 @@ def test_flat_e2e_gradient_parity(case):
     np.testing.assert_allclose(np.asarray(gx).transpose(0, 3, 1, 2), npz["input_grad"], **tol)
 
     gp = nnx.grad(lambda m: m(x).sum())(model)
-    flat_g = {tuple(str(p) for p in path): v for path, v in gp.flat_state()}
+    flat_g = {tuple(str(p) for p in path): v for path, v in nnx.to_flat_state(gp)}
     for tkey, tgrad in grads_of(npz).items():
         path = tuple(str(p) for p in torch_key_to_path(tkey, FLAT_PREFIX_MAP))
         expected = transform_array(tgrad, path[-1])
-        np.testing.assert_allclose(np.asarray(flat_g[path].value), expected,
+        np.testing.assert_allclose(np.asarray(flat_g[path][...]), expected,
                                    err_msg=tkey, **tol)

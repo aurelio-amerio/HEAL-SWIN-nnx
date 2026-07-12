@@ -53,13 +53,13 @@ class WindowAttention(nnx.Module):
             qn = q / jnp.maximum(jnp.linalg.norm(q, axis=-1, keepdims=True), 1e-12)
             kn = k / jnp.maximum(jnp.linalg.norm(k, axis=-1, keepdims=True), 1e-12)
             attn = qn @ kn.swapaxes(-2, -1)
-            logit_scale = jnp.exp(jnp.minimum(self.logit_scale.value, jnp.log(1.0 / 0.01)))
+            logit_scale = jnp.exp(jnp.minimum(self.logit_scale[...], jnp.log(1.0 / 0.01)))
             attn = attn * logit_scale
         else:
             attn = (q * self.scale) @ k.swapaxes(-2, -1)
 
         if self.rel_pos_bias is not None:
-            bias = self.relative_position_bias_table.value[self.relative_position_index.value]
+            bias = self.relative_position_bias_table[...][self.relative_position_index[...]]
             attn = attn + bias.transpose(2, 0, 1)[None]
 
         if mask is not None:
@@ -164,7 +164,7 @@ class SwinTransformerBlock(nnx.Module):
 
         shifted_x = self.shifter.shift(x)
         x_windows = window_partition(shifted_x, self.window_size)
-        mask = None if self.shifter.attn_mask is None else self.shifter.attn_mask.value
+        mask = None if self.shifter.attn_mask is None else self.shifter.attn_mask[...]
         attn_windows = self.attn(x_windows, mask=mask)
         shifted_x = window_reverse(attn_windows, self.window_size, self.input_resolution)
         x = self.shifter.shift_back(shifted_x)
@@ -297,7 +297,7 @@ class SwinHPEncoder(nnx.Module):
     def __call__(self, x):
         x = self.patch_embed(x)
         if self.absolute_pos_embed is not None:
-            x = x + self.absolute_pos_embed.value
+            x = x + self.absolute_pos_embed[...]
         x = self.pos_drop(x)
         skips = []
         for layer in self.layers:
