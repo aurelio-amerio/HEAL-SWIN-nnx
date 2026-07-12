@@ -75,7 +75,7 @@ def gen_indices():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--only", choices=["indices", "leaves", "models"], default=None)
+    parser.add_argument("--only", choices=["indices", "leaves", "models", "models64"], default=None)
     args = parser.parse_args()
     os.makedirs(OUT_DIR, exist_ok=True)
     torch.set_grad_enabled(True)
@@ -85,6 +85,8 @@ def main():
         gen_leaves()   # Task 4
     if args.only in (None, "models"):
         gen_models()   # Task 5
+    if args.only == "models64":
+        gen_models_f64()
 
 
 def run_leaf(name, module, x, meta, call=None):
@@ -268,6 +270,45 @@ def gen_models():
         run_model(name, model, randn(2, 3, 32, 64), hooks,
                   {"overrides": over, "embed_dim": 12, "depths": [2, 2], "num_heads": [2, 4],
                    "data_spec": {"dim_in": [32, 64], "f_in": 3, "f_out": 5}})
+
+
+# Float64 gradient goldens for the 3 e2e cases whose f32 gradient tolerances are
+# loosened (E2E_GRD_OVERRIDES/FLAT_E2E_GRD_OVERRIDES in tests/test_parity_e2e.py),
+# plus 2 controls. Constructed identically to gen_models, then cast to float64 to
+# prove the loosened f32 tolerances are precision noise, not an algorithmic gap.
+F64_HP_CASES = ["hp_base", "hp_ring", "hp_cos_v2"]
+F64_FLAT_CASES = ["flat_base", "flat_cos_v2"]
+
+
+def gen_models_f64():
+    HP_DS = DataSpec(dim_in=2048, f_in=3, f_out=5, base_pix=8,
+                     class_names=["c%d" % i for i in range(5)])
+    FLAT_DS = DataSpec(dim_in=(32, 64), f_in=3, f_out=5, base_pix=None,
+                       class_names=["c%d" % i for i in range(5)])
+
+    for name in F64_HP_CASES:
+        over = HP_CASES[name]
+        torch.manual_seed(0)
+        cfg = hp.SwinHPTransformerConfig(embed_dim=12, depths=[2, 2], num_heads=[2, 4],
+                                         drop_path_rate=0.0, **over)
+        model = hp.SwinHPTransformerSys(cfg, HP_DS).double()
+        x = randn(2, 3, 2048).double()
+        run_model(name + "_f64", model, x, [],
+                  {"overrides": over, "embed_dim": 12, "depths": [2, 2], "num_heads": [2, 4],
+                   "data_spec": {"dim_in": 2048, "f_in": 3, "f_out": 5, "base_pix": 8},
+                   "dtype": "float64"})
+
+    for name in F64_FLAT_CASES:
+        over = FLAT_CASES[name]
+        torch.manual_seed(0)
+        cfg = flat.SwinTransformerConfig(embed_dim=12, depths=[2, 2], num_heads=[2, 4],
+                                         drop_path_rate=0.0, **over)
+        model = flat.SwinTransformerSys(cfg, FLAT_DS).double()
+        x = randn(2, 3, 32, 64).double()
+        run_model(name + "_f64", model, x, [],
+                  {"overrides": over, "embed_dim": 12, "depths": [2, 2], "num_heads": [2, 4],
+                   "data_spec": {"dim_in": [32, 64], "f_in": 3, "f_out": 5},
+                   "dtype": "float64"})
 
 
 if __name__ == "__main__":

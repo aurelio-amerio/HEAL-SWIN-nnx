@@ -62,7 +62,11 @@ healpy 1.15.2) and committed; the main test suite only reads them, it never
 needs torch. Forward outputs match to `rtol=atol=1e-4`; gradients to
 `rtol=1e-3, atol=1e-4` (three ill-conditioned float32 cases — `hp_ring`,
 `hp_cos_v2`, `flat_cos_v2` — are documented and individually loosened in
-`tests/test_parity_e2e.py`). See
+`tests/test_parity_e2e.py`). `tests/test_parity_f64.py` reruns those three
+sensitive cases (plus two controls) against float64 goldens under
+`jax_enable_x64`, matching to ~1e-9; since both implementations agree that
+tightly once precision noise is removed, the loosened float32 tolerances are
+confirmed to be precision-only, not an algorithmic gap. See
 [`parity/README.md`](parity/README.md) for how the fixtures are (re)generated
 and the reference clamp-bug patch that generation requires.
 

@@ -46,3 +46,9 @@ Regeneration procedure:
 
 Verify the reference is pristine again afterwards with
 `git -C references/HEAL-SWIN status --porcelain` (should print nothing).
+
+Pass `--only models64` instead of running the full script to regenerate just
+the float64 gradient goldens (`tests/goldens/{case}_f64.npz` for `hp_base`,
+`hp_ring`, `hp_cos_v2`, `flat_base`, `flat_cos_v2`) used by
+`tests/test_parity_f64.py`; the same clamp-patch procedure applies since these
+cases go through the same small golden configs.
