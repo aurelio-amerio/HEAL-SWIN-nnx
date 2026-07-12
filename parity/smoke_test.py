@@ -1,6 +1,8 @@
 import os
 import sys
 
+os.environ.setdefault("MPLBACKEND", "Agg")  # headless: matplotlib backend autodetect crashes on broken _tkinter
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "references", "HEAL-SWIN"))
 
 import healpy

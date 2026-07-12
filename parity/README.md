@@ -10,4 +10,6 @@ Regenerate all goldens:
     uv sync
     uv run python generate_goldens.py
 
+In headless environments set MPLBACKEND=Agg (the scripts default to it programmatically).
+
 Fixtures are written to `../tests/goldens/`. Commit them.
