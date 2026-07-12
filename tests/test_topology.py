@@ -36,5 +36,7 @@ def test_topology_matrices_shape_and_symmetry():
     for f in range(12):
         for g in hpt.neighbours_matrix[f]:
             assert f in hpt.neighbours_matrix[g]
-    # exactly 8 pinch corners, each shared by no diagonal face
-    assert (hpt.corner_faces_matrix == -1).sum() == 8
+    # 8 pinch corners, each incident to 3 faces -> 24 blocked corner entries,
+    # aligned between the two corner matrices
+    assert (hpt.corner_faces_matrix == -1).sum() == 24
+    assert np.array_equal(hpt.corner_sides_matrix == -1, hpt.corner_faces_matrix == -1)

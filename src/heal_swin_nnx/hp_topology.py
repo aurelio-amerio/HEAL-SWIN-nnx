@@ -38,18 +38,18 @@ side_matrix = np.array([
 # corner_faces_matrix[f][i]: face diagonally across corner i (between edge
 # columns i and i+1 mod 4); -1 at the 8 pinch points where only 3 faces meet.
 corner_faces_matrix = np.array([
-    [-1, 8, 4, 3], [-1, 9, 5, 0], [-1, 10, 6, 1], [-1, 11, 7, 2],
-    [5, 0, 7, 3], [6, 1, 4, 0], [7, 2, 5, 1], [4, 3, 6, 2],
-    [-1, 10, 0, 11], [-1, 11, 1, 8], [-1, 8, 2, 9], [-1, 9, 3, 10],
+    [-1, 8, -1, 2], [-1, 9, -1, 3], [-1, 10, -1, 0], [-1, 11, -1, 1],
+    [5, -1, 7, -1], [6, -1, 4, -1], [7, -1, 5, -1], [4, -1, 6, -1],
+    [-1, 10, -1, 0], [-1, 11, -1, 1], [-1, 8, -1, 2], [-1, 9, -1, 3],
 ], dtype=np.int64)
 
 # corner_sides_matrix[f][i]: which corner of the diagonal face touches ours.
 # 0 = its (nside-1, nside-1), 1 = its (0, 0), 2 = its (nside-1, 0),
 # 3 = its (0, nside-1); -1 where corner_faces_matrix is -1.
 corner_sides_matrix = np.array([
-    [-1, 0, 1, 0], [-1, 0, 1, 0], [-1, 0, 1, 0], [-1, 0, 1, 0],
-    [3, 3, 2, 1], [3, 3, 2, 1], [3, 3, 2, 1], [3, 3, 2, 1],
-    [-1, 1, 1, 3], [-1, 1, 1, 3], [-1, 1, 1, 3], [-1, 1, 1, 3],
+    [-1, 0, -1, 0], [-1, 0, -1, 0], [-1, 0, -1, 0], [-1, 0, -1, 0],
+    [3, -1, 2, -1], [3, -1, 2, -1], [3, -1, 2, -1], [3, -1, 2, -1],
+    [-1, 1, -1, 1], [-1, 1, -1, 1], [-1, 1, -1, 1], [-1, 1, -1, 1],
 ], dtype=np.int64)
 
 
