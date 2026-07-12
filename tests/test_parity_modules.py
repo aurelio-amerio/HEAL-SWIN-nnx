@@ -142,3 +142,80 @@ def test_hp_patch_embed_parity():
     m.eval()
     x = jnp.asarray(npz["input"]).transpose(0, 2, 1)  # torch (B,C,N) -> nnx (B,N,C)
     np.testing.assert_allclose(np.asarray(m(x)), npz["output"], **FWD)
+
+
+from heal_swin_nnx import swin_transformer as flat
+from heal_swin_nnx.config import SwinTransformerConfig
+
+
+def test_flat_window_attention_parity():
+    for case in ("leaf_flat_attn", "leaf_flat_attn_norelbias", "leaf_flat_attn_cos"):
+        npz, meta = load_case(case)
+        m = flat.WindowAttention(dim=meta["dim"], window_size=tuple(meta["window_size"]),
+                                 num_heads=meta["num_heads"],
+                                 use_rel_pos_bias=meta.get("use_rel_pos_bias", True),
+                                 use_cos_attn=meta.get("use_cos_attn", False),
+                                 rngs=nnx.Rngs(0))
+        load_torch_state(m, state_dict_of(npz))
+        _leaf_forward_and_grads(m, npz)
+
+
+def test_flat_merge_expand_parity():
+    npz, meta = load_case("leaf_flat_patch_merging")
+    m = flat.PatchMerging(input_resolution=tuple(meta["input_resolution"]), dim=meta["dim"],
+                          rngs=nnx.Rngs(0))
+    load_torch_state(m, state_dict_of(npz))
+    _leaf_forward_and_grads(m, npz)
+
+    # PatchExpand/FinalPatchExpand_X4 end in the LayerNorm, so the scale-invariance
+    # argument in _leaf_forward_and_grads also makes their expand.weight grads
+    # analytically ~0 (golden max |g| ~ 1e-6 is pure float32 noise); atol 2e-5 for
+    # these two cases only, mirroring test_hp_patch_merge_expand_parity's noise_tol.
+    noise_tol = dict(rtol=1e-4, atol=2e-5)
+
+    npz, meta = load_case("leaf_flat_patch_expand")
+    m = flat.PatchExpand(input_resolution=tuple(meta["input_resolution"]), dim=meta["dim"],
+                         rngs=nnx.Rngs(0))
+    load_torch_state(m, state_dict_of(npz))
+    _leaf_forward_and_grads(m, npz, param_grad_tol=noise_tol)
+
+    npz, meta = load_case("leaf_flat_final_expand")
+    m = flat.FinalPatchExpand_X4(input_resolution=tuple(meta["input_resolution"]),
+                                 patch_size=tuple(meta["patch_size"]), dim=meta["dim"],
+                                 rngs=nnx.Rngs(0))
+    load_torch_state(m, state_dict_of(npz))
+    _leaf_forward_and_grads(m, npz, param_grad_tol=noise_tol)
+
+
+def test_flat_block_parity():
+    for case in ("leaf_flat_block_noshift", "leaf_flat_block_shift", "leaf_flat_block_nomask"):
+        npz, meta = load_case(case)
+        m = flat.SwinTransformerBlock(
+            dim=meta["dim"], input_resolution=tuple(meta["input_resolution"]),
+            num_heads=meta["num_heads"], window_size=tuple(meta["window_size"]),
+            shift_size=tuple(meta["shift_size"]), use_masking=meta.get("use_masking", True),
+            rngs=nnx.Rngs(0))
+        load_torch_state(m, state_dict_of(npz))
+        m.eval()
+        x = jnp.asarray(npz["input"])
+        np.testing.assert_allclose(np.asarray(m(x)), npz["output"], err_msg=case, **FWD)
+        gp = nnx.grad(lambda m: m(x).sum())(m)
+        # qkv key-projection grads are analytically ~0 (softmax is shift-invariant: a
+        # key-side bias shifts all logits for a query uniformly), leaving float32
+        # accumulation noise on small-magnitude entries elsewhere too; atol loosened
+        # to 1e-5 for param grads in this test only, mirroring
+        # test_hp_block_parity_all_shifters (measured max violation 2.4e-6, 4x margin)
+        check_param_grads(gp, grads_of(npz), tol=dict(rtol=1e-4, atol=1e-5))
+
+
+def test_flat_patch_embed_parity():
+    npz, meta = load_case("leaf_flat_patch_embed")
+    cfg = SwinTransformerConfig(patch_size=tuple(meta["patch_size"]),
+                                embed_dim=meta["embed_dim"], depths=[2, 2],
+                                num_heads=[2, 4], drop_path_rate=0.0)
+    ds = DataSpec(dim_in=tuple(meta["dim_in"]), f_in=meta["f_in"], f_out=5)
+    m = flat.PatchEmbed(cfg, ds, rngs=nnx.Rngs(0))
+    load_torch_state(m, state_dict_of(npz))
+    m.eval()
+    x = jnp.asarray(npz["input"]).transpose(0, 2, 3, 1)  # (B,C,H,W) -> (B,H,W,C)
+    np.testing.assert_allclose(np.asarray(m(x)), npz["output"], **FWD)
