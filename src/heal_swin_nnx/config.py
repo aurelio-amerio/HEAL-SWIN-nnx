@@ -14,8 +14,24 @@ class DataSpec:
     dim_in: Union[int, Tuple[int, int]]  # int (=npix) for HP, (H, W) for flat
     f_in: int
     f_out: int
-    base_pix: Optional[int] = None
+    base_pix: Optional[int] = None           # legacy; derived from base_pixels after init
+    base_pixels: Optional[List[int]] = None  # HEALPix faces used; None -> full sphere
     class_names: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        if self.base_pixels is None:
+            self.base_pixels = list(range(12 if self.base_pix is None else self.base_pix))
+        self.base_pixels = list(self.base_pixels)
+        if any(not 0 <= b <= 11 for b in self.base_pixels):
+            raise ValueError("base_pixels must be in [0, 11], got %r" % (self.base_pixels,))
+        if any(a >= b for a, b in zip(self.base_pixels, self.base_pixels[1:])):
+            raise ValueError(
+                "base_pixels must be strictly increasing (canonical NEST subset order), "
+                "got %r" % (self.base_pixels,))
+        if self.base_pix is not None and self.base_pix != len(self.base_pixels):
+            raise ValueError("base_pix=%d inconsistent with base_pixels of length %d"
+                             % (self.base_pix, len(self.base_pixels)))
+        self.base_pix = len(self.base_pixels)
 
 
 @dataclass
