@@ -3,10 +3,9 @@
 All index/mask computation is numpy at construction time; the nnx wrapper
 classes store the results as Buffers and apply pure gathers/rolls at runtime.
 
-The *_TABLES constants encode base-pixel adjacency for the 8-base-pixel
-fisheye subset used by the reference. Full-sphere (base_pix=12) tables are a
-planned extension (see the design spec); unsupported base_pix raises
-NotImplementedError loudly rather than computing garbage.
+Topology tables (base-pixel adjacency, shift offsets, masks) are derived at
+construction time from the HEALPix face-adjacency data in hp_topology, for the
+full sphere or any strictly-increasing subset of the 12 base pixels.
 """
 import math
 
@@ -14,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
+from heal_swin_nnx import hp_topology
 from heal_swin_nnx.variables import Buffer
 
 
@@ -62,8 +62,6 @@ class NestRollShift(nnx.Module):
 
 # --- 8-base-pixel fisheye-subset topology (reference HEAL-SWIN). Keyed by base_pix
 # so that full-sphere tables can be added without touching traversal logic. ---
-NEST_GRID_BASE_PIX_OFFSETS_DIR1 = {8: {0: 2, 1: 2, 2: 2, 3: 6, 4: 3, 5: 3, 6: 3, 7: 3}}
-NEST_GRID_BASE_PIX_OFFSETS_DIR2 = {8: {0: 3, 1: 3, 2: 3, 3: 3, 4: 3, 5: 3, 6: 3, 7: 3}}
 NEST_GRID_MASKED_BASE_PIX = {8: [4, 5, 6, 7]}
 NEST_GRID_LEFT_CARRY_OVER_BASE_PIX = {8: [0, 1, 2, 3]}
 
@@ -110,14 +108,15 @@ def _get_offset_dir2(idx, ws, base_pix_len, base_pix_offsets):
     return offset
 
 
-def nest_grid_shift_idcs(nside, base_pix, window_size):
+def nest_grid_shift_idcs(nside, base_pixels, window_size):
+    base_pixels = list(base_pixels)
+    base_pix = len(base_pixels)
     ws = window_size
     npix = base_pix * nside ** 2
     n_windows = npix // ws
     base_pix_len = (npix // base_pix) // ws
     hws, qws = ws // 2, ws // 4
-    off1 = NEST_GRID_BASE_PIX_OFFSETS_DIR1[base_pix]
-    off2 = NEST_GRID_BASE_PIX_OFFSETS_DIR2[base_pix]
+    off1, off2 = hp_topology.derive_offset_tables(base_pixels)
 
     dir1 = np.zeros(npix, dtype=np.int64)
     for w in range(n_windows):
@@ -176,17 +175,13 @@ def nest_grid_mask(nside, base_pix, window_size):
 
 
 class NestGridShift(nnx.Module):
-    def __init__(self, nside, base_pix, window_size):
-        if base_pix not in NEST_GRID_BASE_PIX_OFFSETS_DIR1:
-            raise NotImplementedError(
-                "NestGridShift topology tables only exist for base_pix in %s; "
-                "full-sphere support is a planned extension (see design spec)"
-                % sorted(NEST_GRID_BASE_PIX_OFFSETS_DIR1))
-        idcs = nest_grid_shift_idcs(nside, base_pix, window_size)
+    def __init__(self, nside, base_pixels, window_size):
+        base_pixels = list(base_pixels)
+        idcs = nest_grid_shift_idcs(nside, base_pixels, window_size)
         self.shift_idcs = Buffer(jnp.asarray(idcs))
         self.back_shift_idcs = Buffer(jnp.asarray(np.argsort(idcs)))
-        self.attn_mask = Buffer(jnp.asarray(
-            get_attn_mask_from_mask(nest_grid_mask(nside, base_pix, window_size), window_size)))
+        self.attn_mask = Buffer(jnp.asarray(get_attn_mask_from_mask(
+            nest_grid_mask(nside, len(base_pixels), window_size), window_size)))
 
     def shift(self, x):
         return jnp.take(x, self.shift_idcs[...], axis=1)

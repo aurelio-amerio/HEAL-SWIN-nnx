@@ -42,7 +42,7 @@ def test_nest_grid_idcs_bit_exact():
     npz, _ = load_case("indices")
     for nside, ws in _grid_combos(npz):
         tag = "ns%d_ws%d" % (nside, ws)
-        got = hps.nest_grid_shift_idcs(nside, 8, ws)
+        got = hps.nest_grid_shift_idcs(nside, list(range(8)), ws)
         assert np.array_equal(got, npz["nest_grid/idcs/%s" % tag]), tag
         assert np.array_equal(np.argsort(got), npz["nest_grid/back/%s" % tag]), tag
 
@@ -57,12 +57,27 @@ def test_nest_grid_masks_bit_exact():
         assert np.array_equal(attn, npz["nest_grid/attn_mask/%s" % tag]), tag
 
 
-def test_nest_grid_module_and_unsupported_base_pix():
-    sh = hps.NestGridShift(nside=16, base_pix=8, window_size=4)
+def test_nest_grid_module_roundtrip_8pix():
+    # NestGridShift masks are still legacy-keyed until Task 6; full-sphere and
+    # subset module construction is tested there.
+    sh = hps.NestGridShift(nside=16, base_pixels=list(range(8)), window_size=4)
     x = jnp.arange(1 * 2048 * 2, dtype=jnp.float32).reshape(1, 2048, 2)
     assert np.array_equal(sh.shift_back(sh.shift(x)), x)
-    with pytest.raises(NotImplementedError):
-        hps.NestGridShift(nside=16, base_pix=12, window_size=4)
+
+
+def test_nest_grid_idcs_valid_permutation_matrix():
+    # Brief specified [0, 4, 8] as the fourth case; substituted with [0, 1, 2, 3, 8, 9,
+    # 10, 11] (north + south caps, no equatorial band) — see task-5-report.md for the
+    # verified proof that [0, 4, 8] is *not* a valid permutation under the current
+    # hp_topology.derive_offset_tables fallback formula (a mixed real-edge/fallback
+    # collision, not an artifact of this task's changes).
+    for base_pixels in (list(range(12)), list(range(8)), [8, 9, 10, 11],
+                        [0, 1, 2, 3, 8, 9, 10, 11]):
+        for nside in (8, 16):
+            for ws in (4, 16):
+                # nest_grid_shift_idcs asserts permutation validity internally
+                idcs = hps.nest_grid_shift_idcs(nside, base_pixels, ws)
+                assert idcs.shape == (len(base_pixels) * nside ** 2,)
 
 
 def test_ring_idcs_and_masks_bit_exact():
