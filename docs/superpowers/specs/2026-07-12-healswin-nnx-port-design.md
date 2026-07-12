@@ -33,9 +33,15 @@ ported.
 - `swin_mlp.py` (dead code in the reference — nothing imports it).
 - Datasets, dataloaders, Lightning wrappers, MLflow, run configs, evaluation
   writers, losses, optimizers.
-- Alternative heads beyond `UnetDecoder` (pooling/classification heads,
+- Alternative heads beyond the UNet decoders (pooling/classification heads,
   diffusion-conditioning adapters). The encoder/head seam is designed for
   them, but they are later one-file additions.
+
+**Naming note:** the spherical decoder is `HPUnetDecoder` (named `UnetDecoder`
+in the reference HP file); the flat decoder is `UnetDecoder` — it has no class
+in the reference (the flat decoder is inlined in `SwinTransformerSys`), so the
+split introduces it. Class names carry no parity constraint: torch state_dict
+keys come from attribute paths, not class names.
 
 ## Key decisions (agreed during brainstorming)
 
@@ -52,7 +58,7 @@ ported.
    are unreachable in the reference).
 3. **Encoder/head split as a first-class seam:** `SwinHPEncoder` is a public
    standalone module returning `(tokens, skips)`; `SwinHPTransformerSys` is a
-   thin composition `UnetDecoder(SwinHPEncoder(x))`. The final encoder
+   thin composition `HPUnetDecoder(SwinHPEncoder(x))`. The final encoder
    `LayerNorm` (reference `forward_features`'s `self.norm`) belongs to the
    encoder. Instantiating the encoder alone allocates no decoder parameters.
 4. **Golden-value parity, forward + gradients:** the torch implementation is
@@ -75,8 +81,9 @@ HEAL-SWIN-nnx/
 │   ├── hp_windowing.py         # window_partition/reverse (jnp), get_nest_win_idcs (numpy)
 │   ├── hp_shifting.py          # NoShift/NestRollShift/NestGridShift/RingShift
 │   ├── swin_hp_transformer.py  # HP blocks, BasicLayer(_up), SwinHPEncoder,
-│   │                           #   UnetDecoder, SwinHPTransformerSys
-│   ├── swin_transformer.py     # flat 2D mirror (encoder, decoder, SwinTransformerSys)
+│   │                           #   HPUnetDecoder, SwinHPTransformerSys
+│   ├── swin_transformer.py     # flat 2D mirror: SwinEncoder, UnetDecoder,
+│   │                           #   SwinTransformerSys
 │   └── weight_transfer.py      # torch-state-npz → nnx state mapping
 ├── parity/                     # separate uv project, legacy torch env
 │   ├── pyproject.toml          # python >=3.8,<3.9; pinned legacy deps
@@ -115,8 +122,8 @@ the paper used.
 All modules are `nnx.Module`s mirroring the torch tree 1:1 in names and
 nesting: `PatchEmbed`, `Mlp`, `WindowAttention`, `SwinTransformerBlock`,
 `PatchMerging`, `PatchExpand`, `FinalPatchExpand_X4`, `BasicLayer`,
-`BasicLayer_up`, `UnetDecoder`, `SwinHPEncoder`, `SwinHPTransformerSys` (plus
-flat counterparts).
+`BasicLayer_up`, `HPUnetDecoder`, `SwinHPEncoder`, `SwinHPTransformerSys`
+(plus flat counterparts `SwinEncoder`, `UnetDecoder`, `SwinTransformerSys`).
 
 - **Data layout:** model-internal layout is `(B, N, C)` exactly as in torch,
   so reshapes/rolls/gathers translate literally. The public nnx API is
@@ -148,7 +155,7 @@ flat counterparts).
 encoder = SwinHPEncoder(config, data_spec, rngs=rngs)
 tokens, skips = encoder(x)   # tokens: (B, N/(patch_size·4^(L-1)), embed_dim·2^(L-1))
 
-model = SwinHPTransformerSys(config, data_spec, rngs=rngs)  # encoder + UnetDecoder
+model = SwinHPTransformerSys(config, data_spec, rngs=rngs)  # encoder + HPUnetDecoder
 y = model(x)                 # (B, N, f_out) — full input resolution
 ```
 
