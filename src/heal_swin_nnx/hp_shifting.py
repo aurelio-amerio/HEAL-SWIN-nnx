@@ -60,12 +60,6 @@ class NestRollShift(nnx.Module):
         return jnp.roll(x, self.shift_size, axis=1)
 
 
-# --- 8-base-pixel fisheye-subset topology (reference HEAL-SWIN). Keyed by base_pix
-# so that full-sphere tables can be added without touching traversal logic. ---
-NEST_GRID_MASKED_BASE_PIX = {8: [4, 5, 6, 7]}
-NEST_GRID_LEFT_CARRY_OVER_BASE_PIX = {8: [0, 1, 2, 3]}
-
-
 def _log4(x):
     return int(math.log(x) / math.log(4))
 
@@ -142,13 +136,15 @@ def nest_grid_shift_idcs(nside, base_pixels, window_size):
     return result
 
 
-def nest_grid_mask(nside, base_pix, window_size):
+def nest_grid_mask(nside, base_pixels, window_size):
+    base_pixels = list(base_pixels)
+    base_pix = len(base_pixels)
     ws = window_size
     hws, qws = ws // 2, ws // 4
     npix = base_pix * nside ** 2
     base_pix_len = (npix // base_pix) // ws
-    masked = NEST_GRID_MASKED_BASE_PIX[base_pix]
-    carry = NEST_GRID_LEFT_CARRY_OVER_BASE_PIX[base_pix]
+    masked, carry = hp_topology.derive_mask_faces(
+        base_pixels, nside, ws, nest_grid_shift_idcs(nside, base_pixels, ws))
     mask = np.zeros(npix)
 
     def right_mask_subset(first, size, mask_value):
@@ -166,11 +162,18 @@ def nest_grid_mask(nside, base_pix, window_size):
             left_mask_subset(first, size // 4, mask_value)
             left_mask_subset(first + size // 4, size // 4, mask_value)
 
-    for b, co in zip(masked, carry):
+    # Two-phase assembly: all region labels first, then all carry writes. A face can
+    # be both masked and a carry target (never true for the reference [0..7], where
+    # masked=[4..7] and carry=[0..3] are disjoint; e.g. full sphere: face 11 is masked
+    # and also carries for masked face 8), and the carry label on its first qws pixels
+    # must survive the face's own left/right region labeling — so carries go last.
+    for b in masked:
         left_mask_subset(b * base_pix_len * ws, base_pix_len * ws, b + 1)
         right_mask_subset(b * base_pix_len * ws, base_pix_len * ws, b + 1 + len(masked))
-        first_co = co * base_pix_len * ws
-        mask[first_co:first_co + qws] = b + 1
+    for b, co in zip(masked, carry):
+        if co is not None:
+            first_co = co * base_pix_len * ws
+            mask[first_co:first_co + qws] = b + 1
     return mask
 
 
@@ -181,7 +184,7 @@ class NestGridShift(nnx.Module):
         self.shift_idcs = Buffer(jnp.asarray(idcs))
         self.back_shift_idcs = Buffer(jnp.asarray(np.argsort(idcs)))
         self.attn_mask = Buffer(jnp.asarray(get_attn_mask_from_mask(
-            nest_grid_mask(nside, len(base_pixels), window_size), window_size)))
+            nest_grid_mask(nside, base_pixels, window_size), window_size)))
 
     def shift(self, x):
         return jnp.take(x, self.shift_idcs[...], axis=1)

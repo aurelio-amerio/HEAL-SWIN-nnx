@@ -51,7 +51,7 @@ def test_nest_grid_masks_bit_exact():
     npz, _ = load_case("indices")
     for nside, ws in _grid_combos(npz):
         tag = "ns%d_ws%d" % (nside, ws)
-        raw = hps.nest_grid_mask(nside, 8, ws)
+        raw = hps.nest_grid_mask(nside, list(range(8)), ws)
         assert np.array_equal(raw, npz["nest_grid/mask_raw/%s" % tag]), tag
         attn = hps.get_attn_mask_from_mask(raw, ws)
         assert np.array_equal(attn, npz["nest_grid/attn_mask/%s" % tag]), tag
@@ -101,3 +101,49 @@ def test_ring_module_and_unsupported_base_pix():
     assert np.array_equal(sh.shift_back(sh.shift(x)), x)
     with pytest.raises(NotImplementedError):
         hps.RingShift(nside=16, base_pix=12, window_size=4, shift_size=2)
+
+
+def test_nest_grid_module_roundtrip_full_sphere_and_subsets():
+    # Brief specified [0, 4, 8] as a subset case; substituted with [0, 1, 2, 3, 8, 9,
+    # 10, 11] per controller adjudication — [0, 4, 8] is unsatisfiable for the
+    # nest-grid strategy (self-map fallback for local face 0 collides with face 4's
+    # genuine pull from face 0), consistent with the exclusion already made in
+    # test_nest_grid_idcs_valid_permutation_matrix (Task 5).
+    for base_pixels in (list(range(12)), [8, 9, 10, 11], [0, 1, 2, 3, 8, 9, 10, 11]):
+        npix = len(base_pixels) * 16 ** 2
+        sh = hps.NestGridShift(nside=16, base_pixels=base_pixels, window_size=4)
+        x = jnp.arange(1 * npix * 2, dtype=jnp.float32).reshape(1, npix, 2)
+        assert np.array_equal(sh.shift_back(sh.shift(x)), x), base_pixels
+
+
+def _slot_grid(ws):
+    from heal_swin_nnx.hp_windowing import get_nest_win_idcs
+    return get_nest_win_idcs(ws)
+
+
+def test_nest_grid_mask_ground_truth_full_sphere_and_south_cap():
+    """Unmasked canonically-adjacent slot pairs must be sky-adjacent (spec 6.2)."""
+    import healpy as hp
+    from heal_swin_nnx import hp_topology as hpt
+    for base_pixels in (list(range(12)), [8, 9, 10, 11]):
+        nside, ws = 8, 4
+        idcs = hps.nest_grid_shift_idcs(nside, base_pixels, ws)
+        raw = hps.nest_grid_mask(nside, base_pixels, ws)
+        grid = _slot_grid(ws)
+        s = grid.shape[0]
+        for w in range(len(idcs) // ws):
+            win_src = hpt.local_to_global(base_pixels, nside, idcs[w * ws:(w + 1) * ws])
+            win_lbl = raw[w * ws:(w + 1) * ws]
+            for gx in range(s):
+                for gy in range(s):
+                    a = grid[gx, gy]
+                    for nx, ny in ((gx + 1, gy), (gx, gy + 1)):
+                        if nx >= s or ny >= s:
+                            continue
+                        b = grid[nx, ny]
+                        if win_lbl[a] != win_lbl[b]:
+                            continue  # masked apart — no geometric claim
+                        p, q = int(win_src[a]), int(win_src[b])
+                        neigh = set(int(v) for v in
+                                    hp.get_all_neighbours(nside, p, nest=True) if v >= 0)
+                        assert q in neigh, "window %d slots %d-%d: %d !~ %d" % (w, a, b, p, q)

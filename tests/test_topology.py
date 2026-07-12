@@ -70,3 +70,12 @@ def test_derive_offset_tables_south_cap():
     off1, off2 = hpt.derive_offset_tables([8, 9, 10, 11])
     assert off1 == {0: 0, 1: 0, 2: 0, 3: 0}
     assert off2 == {0: 2, 1: 2, 2: 2, 3: 2}
+
+
+def test_derive_mask_faces_reproduces_reference_8pix():
+    from heal_swin_nnx.hp_shifting import nest_grid_shift_idcs
+    base_pixels, nside, ws = list(range(8)), 16, 4
+    idcs = nest_grid_shift_idcs(nside, base_pixels, ws)
+    masked, carry = hpt.derive_mask_faces(base_pixels, nside, ws, idcs)
+    assert masked == [4, 5, 6, 7]
+    assert carry == [0, 1, 2, 3]

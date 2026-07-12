@@ -170,6 +170,53 @@ DIR1_COL = [1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2]
 DIR2_COL = [2, 2, 2, 2, 0, 0, 0, 0, 1, 1, 1, 1]
 
 
+def _window_slot_grid_ok(base_pixels, nside, window_size, local_sources):
+    """True iff every canonically-adjacent slot pair in this window, other than
+    pairs touching a flat slot in [0, window_size // 4), holds sky-adjacent
+    source pixels (the seam-correctness criterion). The first quarter-window
+    slots are exempt because they are exactly the positions the carry-over
+    write of nest_grid_mask can re-label: a bad glue there is repaired by the
+    carry label (which separates those slots from the rest of the window in
+    the attention mask), so it does not force masking the whole face."""
+    from heal_swin_nnx.hp_windowing import get_nest_win_idcs
+    grid = get_nest_win_idcs(window_size)
+    s = grid.shape[0]
+    qws = window_size // 4
+    local_sources = np.asarray(local_sources)
+    glob = local_to_global(base_pixels, nside, local_sources)
+    for gx in range(s):
+        for gy in range(s):
+            a = grid[gx, gy]
+            for nx, ny in ((gx + 1, gy), (gx, gy + 1)):
+                if nx < s and ny < s:
+                    b = grid[nx, ny]
+                    if a < qws or b < qws:
+                        continue
+                    if int(glob[b]) not in grid_neighbours(nside, int(glob[a])):
+                        return False
+    return True
+
+
+def derive_mask_faces(base_pixels, nside, window_size, shift_idcs):
+    """Face-level (masked, carry_over) lists for nest_grid_mask, decided by
+    geometry: a face is masked iff its first (boundary) window glues content
+    that is not sky-adjacent (spec 3.3). carry_over[k] is the face whose dir2
+    boundary content comes *from* masked face k (it holds k's carried pixels)."""
+    base_pixels = list(base_pixels)
+    n = len(base_pixels)
+    face_len = nside * nside
+    masked = [i for i in range(n)
+              if not _window_slot_grid_ok(base_pixels, nside, window_size,
+                                          shift_idcs[i * face_len:i * face_len + window_size])]
+    _, off2 = derive_offset_tables(base_pixels)
+    dir2_source = {j: (j - off2[j] - 1) % n for j in range(n)}
+    carry = []
+    for b in masked:
+        takers = [j for j in range(n) if dir2_source[j] == b and j != b]
+        carry.append(takers[0] if takers else None)
+    return masked, carry
+
+
 def derive_offset_tables(base_pixels):
     """dir1/dir2 base-pixel offset tables for the NEST grid shift, keyed by
     local face position. A face whose source neighbour is outside base_pixels

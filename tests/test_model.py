@@ -88,12 +88,16 @@ def test_base_pix_12_nest_roll_works_grid_mask_still_legacy():
     model.eval()
     y = model(jnp.ones((1, ds.dim_in, 3)))
     assert y.shape == (1, ds.dim_in, 5)
-    # NestGridShift construction no longer rejects base_pix != 8 (full-sphere-extension
-    # Task 5 generalized nest_grid_shift_idcs to arbitrary base_pixels); nest_grid_mask
-    # is still the legacy int/8-only lookup until Task 6 derives masks from the
-    # topology tables, so it raises KeyError for any other base_pix count.
-    with pytest.raises(KeyError):
-        tiny_hp(base_pix=12, shift_strategy="nest_grid_shift")
+    # nest_grid_mask is no longer the legacy int/8-only lookup (full-sphere-extension
+    # Task 6 derives masks geometrically via hp_topology.derive_mask_faces for any
+    # base_pixels sequence), so constructing a 12-face model with nest_grid_shift no
+    # longer raises KeyError; it builds successfully (full per-window geometric
+    # correctness of the resulting mask for base_pix=12 is a separate, still-open
+    # question — see task-6-report.md).
+    model12, ds12 = tiny_hp(base_pix=12, shift_strategy="nest_grid_shift")
+    model12.eval()
+    y12 = model12(jnp.ones((1, ds12.dim_in, 3)))
+    assert y12.shape == (1, ds12.dim_in, 5)
 
 
 def test_no_buffer_is_a_param():
