@@ -58,8 +58,6 @@ def test_nest_grid_masks_bit_exact():
 
 
 def test_nest_grid_module_roundtrip_8pix():
-    # NestGridShift masks are still legacy-keyed until Task 6; full-sphere and
-    # subset module construction is tested there.
     sh = hps.NestGridShift(nside=16, base_pixels=list(range(8)), window_size=4)
     x = jnp.arange(1 * 2048 * 2, dtype=jnp.float32).reshape(1, 2048, 2)
     assert np.array_equal(sh.shift_back(sh.shift(x)), x)
@@ -121,10 +119,11 @@ def _slot_grid(ws):
     return get_nest_win_idcs(ws)
 
 
-def test_nest_grid_mask_ground_truth_full_sphere_and_south_cap():
+def test_nest_grid_mask_ground_truth():
     """Unmasked canonically-adjacent slot pairs must be sky-adjacent (spec 6.2)."""
     import healpy as hp
-    for base_pixels in (list(range(12)), [8, 9, 10, 11]):
+    for base_pixels in (list(range(12)), [8, 9, 10, 11], [0, 1, 2, 3],
+                        [0, 1, 2, 3, 8, 9, 10, 11]):
         nside, ws = 8, 4
         idcs = hps.nest_grid_shift_idcs(nside, base_pixels, ws)
         raw = hps.nest_grid_mask(nside, base_pixels, ws)

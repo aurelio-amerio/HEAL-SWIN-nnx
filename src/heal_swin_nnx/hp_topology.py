@@ -201,7 +201,16 @@ def derive_mask_faces(base_pixels, nside, window_size, shift_idcs):
     """Face-level (masked, carry_over) lists for nest_grid_mask, decided by
     geometry: a face is masked iff its first (boundary) window glues content
     that is not sky-adjacent (spec 3.3). carry_over[k] is the face whose dir2
-    boundary content comes *from* masked face k (it holds k's carried pixels)."""
+    boundary content comes *from* masked face k (it holds k's carried pixels).
+
+    Known theoretical residual: a face could in principle have both a real
+    (non-self) taker and a self-pull (its own dir2 source maps to itself,
+    i.e. two "takers" of face k under dir2_source, one of which is k itself).
+    The single-carry contract here only separates one taker's content (a
+    non-self taker is preferred; see nest_grid_mask's self-carry label for the
+    self-pull case). No currently tested base-pixel subset produces a face
+    with both a real taker and a self-pull simultaneously; the ground-truth
+    test (test_nest_grid_mask_ground_truth) is the backstop for this."""
     base_pixels = list(base_pixels)
     n = len(base_pixels)
     face_len = nside * nside
@@ -212,8 +221,9 @@ def derive_mask_faces(base_pixels, nside, window_size, shift_idcs):
     dir2_source = {j: (j - off2[j] - 1) % n for j in range(n)}
     carry = []
     for b in masked:
-        takers = [j for j in range(n) if dir2_source[j] == b and j != b]
-        carry.append(takers[0] if takers else None)
+        takers = [j for j in range(n) if dir2_source[j] == b]
+        non_self = [j for j in takers if j != b]
+        carry.append(non_self[0] if non_self else (takers[0] if takers else None))
     return masked, carry
 
 

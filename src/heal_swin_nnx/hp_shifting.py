@@ -173,7 +173,12 @@ def nest_grid_mask(nside, base_pixels, window_size):
     for b, co in zip(masked, carry):
         if co is not None:
             first_co = co * base_pix_len * ws
-            mask[first_co:first_co + qws] = b + 1
+            # A self-carry (co == b) means a self-mapped fictitious seam glues
+            # face b's own tail into its own head: the carried slots must be
+            # isolated from BOTH of b's own region labels (b+1 left, b+1+len
+            # (masked) right), so use a label outside that pair.
+            label = b + 1 if co != b else b + 1 + 2 * len(masked)
+            mask[first_co:first_co + qws] = label
     return mask
 
 
@@ -194,8 +199,10 @@ class NestGridShift(nnx.Module):
 
 
 class NestGridShiftExact(nnx.Module):
-    """Seam-exact grid shift: connects the true boundary pixels across every
-    face seam (mask only at pinch corners and subset borders). See spec §4."""
+    """Seam-exact grid shift: seam-exact wherever the two faces' local frames
+    align (all polar-to-equatorial seams). Attention masking remains at the 8
+    pinch points, at the 90-degree-rotated south-south seams, and at coverage
+    borders for partial-sky models. See spec §4."""
 
     def __init__(self, nside, base_pixels, window_size):
         idcs, raw_mask = hp_topology.exact_shift_idcs_and_mask(

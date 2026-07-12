@@ -230,6 +230,16 @@ Residual approximations (documented, not fixable by indexing):
   inherent to HEAL-SWIN everywhere, including face interiors and the reference; the exact
   shift neither fixes nor worsens it.
 
+> **Amendment (implementation finding, Task 8):** the uniform `(x-d, y-d)` walk is
+> not injective on the sphere — south-south seam crossings rotate the local frame
+> 90°, and a global translation flow must have pole singularities. The implemented
+> design assigns in-face sources first (preserving interior equality), resolves
+> cross-seam claims deterministically with collision losers backfilled, and derives
+> the attention mask from sky-contiguity components of every window. Consequently
+> masking appears at pinch corners, coverage borders, AND rotated south-south seams
+> (the south cap is masked there, not mask-free as predicted below). See
+> `hp_topology.exact_shift_idcs_and_mask` and `tests/test_seam_geometry.py`.
+
 ## 5. Propagation
 
 - `swin_hp_transformer.py`: thread `base_pixels` to shifter constructors; add the
