@@ -235,6 +235,116 @@ def derive_ring_lost_from(base_pixels):
     return out
 
 
+def _window_components(base_pixels, nside, window_size, local_sources, backfilled):
+    """Label window slots by sky-contiguity (union-find over canonically
+    adjacent, sky-adjacent slot pairs); each backfilled slot is its own label."""
+    from heal_swin_nnx.hp_windowing import get_nest_win_idcs
+    grid = get_nest_win_idcs(window_size)
+    s = grid.shape[0]
+    glob = local_to_global(base_pixels, nside, np.asarray(local_sources))
+    parent = list(range(window_size))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for gx in range(s):
+        for gy in range(s):
+            a = int(grid[gx, gy])
+            if backfilled[a]:
+                continue
+            for nx, ny in ((gx + 1, gy), (gx, gy + 1)):
+                if nx < s and ny < s and not backfilled[int(grid[nx, ny])]:
+                    b = int(grid[nx, ny])
+                    if int(glob[b]) in grid_neighbours(nside, int(glob[a])):
+                        parent[find(a)] = find(b)
+    roots, labels = {}, np.zeros(window_size)
+    for slot in range(window_size):
+        key = ("bf", slot) if backfilled[slot] else find(slot)
+        labels[slot] = roots.setdefault(key, len(roots))
+    return labels
+
+
+def exact_shift_idcs_and_mask(base_pixels, nside, window_size):
+    """Seam-exact shift indices + raw region mask (spec section 4, as amended).
+
+    The intended source of destination pixel (x, y, f) is the pixel at
+    (x - d, y - d) walked across face seams with orientation transforms,
+    d = sqrt(ws)//2, matching the approximate strategy's interior behaviour.
+    A single uniform (-d, -d) flow cannot be injective on the whole sphere:
+    south-south seam crossings swap x and y (a 90-degree frame rotation, see
+    side_matrix rows 8-11), so walked sources collide along those seams and
+    near the poles. Assignment is therefore two-phase:
+
+    Phase 1 (in-face): destinations whose source stays inside their own face
+    take it unconditionally — an injective translation, identical to the
+    approximate strategy's interior assignments.
+    Phase 2 (cross-seam, ascending dest order for determinism): the walked
+    source is assigned only if it lies in base_pixels and is still unclaimed.
+    Pinch corners (walk -> None), out-of-subset sources, and collision losers
+    all become holes, backfilled from the never-claimed (lost) pixels in
+    ascending order; lost == holes then holds by counting.
+
+    Masking is component-driven for every window: slots are labeled by
+    sky-contiguity of their sources (backfilled slots are singleton labels);
+    single-component windows carry no mask ('the gather is the rotation'),
+    multi-component windows get distinct region labels.
+    """
+    base_pixels = list(base_pixels)
+    face_len = nside * nside
+    npix = len(base_pixels) * face_len
+    s = int(round(window_size ** 0.5))
+    assert s * s == window_size
+    d = s // 2
+    selected = set(base_pixels)
+
+    x, y, f = pix2xyf(nside, local_to_global(base_pixels, nside, np.arange(npix)))
+    src = np.full(npix, -1, dtype=np.int64)
+    claimed = np.zeros(npix, dtype=bool)
+
+    # phase 1: in-face translations
+    for dest in range(npix):
+        if x[dest] >= d and y[dest] >= d:
+            g = xyf2pix(nside, int(x[dest]) - d, int(y[dest]) - d, int(f[dest]))
+            sl = int(global_to_local(base_pixels, nside, g))
+            src[dest] = sl
+            claimed[sl] = True
+
+    # phase 2: cross-seam walks; pinch corners, out-of-subset sources and
+    # collision losers all become holes
+    for dest in range(npix):
+        if src[dest] >= 0:
+            continue
+        r = walk(nside, int(x[dest]) - d, int(y[dest]) - d, int(f[dest]))
+        if r is None or r[2] not in selected:
+            continue
+        sl = int(global_to_local(base_pixels, nside,
+                                 xyf2pix(nside, r[0], r[1], r[2])))
+        if not claimed[sl]:
+            src[dest] = sl
+            claimed[sl] = True
+
+    holes = np.where(src < 0)[0]
+    lost = np.where(~claimed)[0]
+    assert lost.shape[0] == holes.shape[0], (
+        "backfill accounting mismatch: %d lost vs %d holes" % (lost.shape[0], holes.shape[0]))
+    src[holes] = lost
+    assert np.array_equal(np.sort(src), np.arange(npix)), "exact shift is not a permutation"
+
+    mask = np.zeros(npix)
+    next_label = 1.0
+    for w in range(npix // window_size):
+        sl = slice(w * window_size, (w + 1) * window_size)
+        backfilled = np.isin(np.arange(sl.start, sl.stop), holes)
+        labels = _window_components(base_pixels, nside, window_size, src[sl], backfilled)
+        if labels.max() > 0:
+            mask[sl] = labels + next_label
+            next_label += labels.max() + 1
+    return src, mask
+
+
 def derive_offset_tables(base_pixels):
     """dir1/dir2 base-pixel offset tables for the NEST grid shift, keyed by
     local face position. A face whose source neighbour is outside base_pixels

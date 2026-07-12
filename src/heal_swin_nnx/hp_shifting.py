@@ -193,6 +193,24 @@ class NestGridShift(nnx.Module):
         return jnp.take(x, self.back_shift_idcs[...], axis=1)
 
 
+class NestGridShiftExact(nnx.Module):
+    """Seam-exact grid shift: connects the true boundary pixels across every
+    face seam (mask only at pinch corners and subset borders). See spec §4."""
+
+    def __init__(self, nside, base_pixels, window_size):
+        idcs, raw_mask = hp_topology.exact_shift_idcs_and_mask(
+            list(base_pixels), nside, window_size)
+        self.shift_idcs = Buffer(jnp.asarray(idcs))
+        self.back_shift_idcs = Buffer(jnp.asarray(np.argsort(idcs)))
+        self.attn_mask = Buffer(jnp.asarray(get_attn_mask_from_mask(raw_mask, window_size)))
+
+    def shift(self, x):
+        return jnp.take(x, self.shift_idcs[...], axis=1)
+
+    def shift_back(self, x):
+        return jnp.take(x, self.back_shift_idcs[...], axis=1)
+
+
 # --- ring topology (healpy ring coordinate, cross-base-pixel wrapping) ---
 def ring_shift_idcs_and_mask(nside, base_pixels, window_size, shift_size):
     import healpy as hp  # local import: healpy pulls matplotlib; keep module import light

@@ -2,6 +2,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from heal_swin_nnx import hp_shifting as hps
+from heal_swin_nnx import hp_topology as hpt
 from tests.parity_utils import load_case
 
 
@@ -123,7 +124,6 @@ def _slot_grid(ws):
 def test_nest_grid_mask_ground_truth_full_sphere_and_south_cap():
     """Unmasked canonically-adjacent slot pairs must be sky-adjacent (spec 6.2)."""
     import healpy as hp
-    from heal_swin_nnx import hp_topology as hpt
     for base_pixels in (list(range(12)), [8, 9, 10, 11]):
         nside, ws = 8, 4
         idcs = hps.nest_grid_shift_idcs(nside, base_pixels, ws)
@@ -162,7 +162,77 @@ def test_ring_subset_masks_out_of_domain_sources():
     ring = np.arange(12 * nside ** 2)
     full = hp.pixelfunc.ring2nest(nside, np.roll(ring, 2))[
         hp.pixelfunc.nest2ring(nside, np.arange(12 * nside ** 2))]
-    from heal_swin_nnx import hp_topology as hpt
     sel = hpt.local_to_global(base_pixels, nside, np.arange(len(idcs)))
     out_of_domain = hpt.global_to_local(base_pixels, nside, full[sel]) < 0
     assert np.array_equal(raw > 0, out_of_domain)
+
+
+def test_exact_shift_valid_permutation_and_backfill_accounting():
+    # The plan's original expectation (south cap closes on itself -> zero holes,
+    # zero mask) was geometrically wrong: south-south seam crossings swap x and y
+    # (a 90-degree frame rotation, side_matrix rows 8-11), so the uniform (-d, -d)
+    # walk collides along those seams and near the pole (verified against healpy).
+    # Count-free invariants instead; per-pair geometric correctness is arbitrated
+    # by test_exact_shift_colabelled_pairs_sky_adjacent below.
+    for base_pixels in (list(range(12)), [8, 9, 10, 11], list(range(8))):
+        nside, ws = 8, 4
+        d = int(round(ws ** 0.5)) // 2
+        idcs, raw = hpt.exact_shift_idcs_and_mask(base_pixels, nside, ws)
+        npix = len(base_pixels) * nside ** 2
+        assert np.array_equal(np.sort(idcs), np.arange(npix)), base_pixels
+        if base_pixels == list(range(12)):
+            # pinch floor: the four south-pointing pinch corners are backfilled
+            # and masked; rotated-seam masking legitimately adds more windows
+            n_masked_windows = len(np.unique(np.nonzero(raw)[0] // ws))
+            assert n_masked_windows >= 4
+            assert (raw > 0).sum() >= 4 * d * d
+        if base_pixels == [8, 9, 10, 11]:
+            # rotated south-south seams force masking even on the closed cap
+            assert (raw > 0).any()
+
+
+def test_exact_shift_colabelled_pairs_sky_adjacent():
+    """Equal-label canonically-adjacent slot pairs must hold sky-adjacent sources
+    (spec 6.1, Task 9's headline invariant pulled forward as this task's gate)."""
+    import healpy as hp
+    for base_pixels in (list(range(12)), [8, 9, 10, 11]):
+        nside, ws = 8, 4
+        idcs, raw = hpt.exact_shift_idcs_and_mask(base_pixels, nside, ws)
+        grid = _slot_grid(ws)
+        s = grid.shape[0]
+        for w in range(len(idcs) // ws):
+            win_src = hpt.local_to_global(base_pixels, nside, idcs[w * ws:(w + 1) * ws])
+            win_lbl = raw[w * ws:(w + 1) * ws]
+            for gx in range(s):
+                for gy in range(s):
+                    a = grid[gx, gy]
+                    for nx, ny in ((gx + 1, gy), (gx, gy + 1)):
+                        if nx >= s or ny >= s:
+                            continue
+                        b = grid[nx, ny]
+                        if win_lbl[a] != win_lbl[b]:
+                            continue  # masked apart — no geometric claim
+                        p, q = int(win_src[a]), int(win_src[b])
+                        neigh = set(int(v) for v in
+                                    hp.get_all_neighbours(nside, p, nest=True) if v >= 0)
+                        assert q in neigh, "window %d slots %d-%d: %d !~ %d" % (w, a, b, p, q)
+
+
+def test_exact_matches_approximate_on_face_interiors():
+    for base_pixels in (list(range(12)), list(range(8)), [8, 9, 10, 11]):
+        nside, ws = 8, 4
+        d = int(round(ws ** 0.5)) // 2
+        approx = hps.nest_grid_shift_idcs(nside, base_pixels, ws)
+        exact, _ = hpt.exact_shift_idcs_and_mask(base_pixels, nside, ws)
+        npix = len(base_pixels) * nside ** 2
+        x, y, _f = hpt.pix2xyf(nside, hpt.local_to_global(base_pixels, nside, np.arange(npix)))
+        interior = (x >= d) & (y >= d)
+        assert np.array_equal(exact[interior], approx[interior]), base_pixels
+
+
+def test_exact_shift_module_roundtrip():
+    for base_pixels in (list(range(12)), [8, 9, 10, 11]):
+        npix = len(base_pixels) * 16 ** 2
+        sh = hps.NestGridShiftExact(nside=16, base_pixels=base_pixels, window_size=4)
+        x = jnp.arange(1 * npix * 2, dtype=jnp.float32).reshape(1, npix, 2)
+        assert np.array_equal(sh.shift_back(sh.shift(x)), x), base_pixels
