@@ -162,3 +162,26 @@ def grid_neighbours(nside, pix):
             if r is not None:
                 out.add(int(xyf2pix(nside, r[0], r[1], r[2])))
     return out
+
+
+# Which neighbour column is the dir1/dir2 shift source for each face; the
+# south polar ring is reflected relative to the north, hence the swap.
+DIR1_COL = [1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2]
+DIR2_COL = [2, 2, 2, 2, 0, 0, 0, 0, 1, 1, 1, 1]
+
+
+def derive_offset_tables(base_pixels):
+    """dir1/dir2 base-pixel offset tables for the NEST grid shift, keyed by
+    local face position. A face whose source neighbour is outside base_pixels
+    maps to itself (offset n-1), producing a fictitious seam that
+    derive_mask_faces will mask."""
+    base_pixels = list(base_pixels)
+    n = len(base_pixels)
+    pos = {f: i for i, f in enumerate(base_pixels)}
+    off1, off2 = {}, {}
+    for i, b in enumerate(base_pixels):
+        nb1 = int(neighbours_matrix[b][DIR1_COL[b]])
+        nb2 = int(neighbours_matrix[b][DIR2_COL[b]])
+        off1[i] = (i - pos.get(nb1, i) - 1) % n
+        off2[i] = (i - pos.get(nb2, i) - 1) % n
+    return off1, off2

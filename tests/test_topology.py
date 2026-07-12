@@ -50,3 +50,23 @@ def test_grid_neighbours_match_healpy_exhaustively(nside):
         ours = hpt.grid_neighbours(nside, pix)
         theirs = set(int(v) for v in hp.get_all_neighbours(nside, pix, nest=True) if v >= 0)
         assert ours == theirs, "pixel %d: %r != %r" % (pix, sorted(ours), sorted(theirs))
+
+
+def test_derive_offset_tables_reproduces_reference_8pix():
+    off1, off2 = hpt.derive_offset_tables(list(range(8)))
+    assert off1 == {0: 2, 1: 2, 2: 2, 3: 6, 4: 3, 5: 3, 6: 3, 7: 3}
+    assert off2 == {0: 3, 1: 3, 2: 3, 3: 3, 4: 3, 5: 3, 6: 3, 7: 3}
+
+
+def test_derive_offset_tables_full_sphere():
+    off1, off2 = hpt.derive_offset_tables(list(range(12)))
+    assert off1 == {0: 6, 1: 6, 2: 6, 3: 10, 4: 3, 5: 3, 6: 3, 7: 3,
+                    8: 8, 9: 0, 10: 0, 11: 0}
+    assert off2 == {0: 7, 1: 7, 2: 7, 3: 7, 4: 3, 5: 3, 6: 3, 7: 3,
+                    8: 10, 9: 10, 10: 10, 11: 2}
+
+
+def test_derive_offset_tables_south_cap():
+    off1, off2 = hpt.derive_offset_tables([8, 9, 10, 11])
+    assert off1 == {0: 0, 1: 0, 2: 0, 3: 0}
+    assert off2 == {0: 2, 1: 2, 2: 2, 3: 2}
