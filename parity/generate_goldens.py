@@ -187,8 +187,87 @@ def gen_leaves():
                   "window_size": [4, 4], **kw})
 
 
+HP_CASES = {
+    "hp_base": {},
+    "hp_grid": {"shift_strategy": "nest_grid_shift"},
+    "hp_ring": {"shift_strategy": "ring_shift"},
+    "hp_cos_v2": {"use_cos_attn": True, "use_v2_norm_placement": True},
+    "hp_relbias": {"rel_pos_bias": "flat"},
+    "hp_ape": {"ape": True},
+}
+FLAT_CASES = {
+    "flat_base": {},
+    "flat_cos_v2": {"use_cos_attn": True, "use_v2_norm_placement": True},
+    "flat_norelbias": {"use_rel_pos_bias": False},
+    "flat_nomask": {"use_masking": False},
+    "flat_ape": {"ape": True},
+}
+
+
+def run_model(name, model, x, hooks, meta):
+    model.eval()
+    inter = {}
+
+    def mk(key):
+        def hook(_mod, _inp, out):
+            inter[key] = to_np(out)
+        return hook
+
+    handles = [m.register_forward_hook(mk(k)) for k, m in hooks]
+    x = x.clone().detach().requires_grad_(True)
+    y = model(x)
+    y.sum().backward()
+    for h in handles:
+        h.remove()
+    arrays = {"input": to_np(x), "output": to_np(y), "input_grad": to_np(x.grad)}
+    for k, v in model.state_dict().items():
+        arrays["sd/%s" % k] = to_np(v)
+    for k, p in model.named_parameters():
+        if p.grad is not None:
+            arrays["grad/%s" % k] = to_np(p.grad)
+    for k, v in inter.items():
+        arrays["int/%s" % k] = v
+    save_case(name, arrays, meta)
+
+
 def gen_models():
-    pass  # filled in Task 5
+    HP_DS = DataSpec(dim_in=2048, f_in=3, f_out=5, base_pix=8,
+                     class_names=["c%d" % i for i in range(5)])
+    FLAT_DS = DataSpec(dim_in=(32, 64), f_in=3, f_out=5, base_pix=None,
+                       class_names=["c%d" % i for i in range(5)])
+
+    for name, over in HP_CASES.items():
+        torch.manual_seed(0)
+        cfg = hp.SwinHPTransformerConfig(embed_dim=12, depths=[2, 2], num_heads=[2, 4],
+                                         drop_path_rate=0.0, **over)
+        model = hp.SwinHPTransformerSys(cfg, HP_DS)
+        if over.get("rel_pos_bias") == "flat":
+            with torch.no_grad():  # tables init to zeros; randomize so the bias path is exercised
+                for mod in model.modules():
+                    if hasattr(mod, "relative_position_bias_table"):
+                        mod.relative_position_bias_table.normal_(0, 0.02)
+        hooks = [("patch_embed", model.patch_embed)]
+        hooks += [("enc_layer_%d" % i, l) for i, l in enumerate(model.layers)]
+        hooks += [("enc_norm", model.norm)]
+        hooks += [("dec_layer_up_%d" % i, l) for i, l in enumerate(model.decoder.layers_up)]
+        hooks += [("dec_norm_up", model.decoder.norm_up), ("dec_up", model.decoder.up)]
+        run_model(name, model, randn(2, 3, 2048), hooks,
+                  {"overrides": over, "embed_dim": 12, "depths": [2, 2], "num_heads": [2, 4],
+                   "data_spec": {"dim_in": 2048, "f_in": 3, "f_out": 5, "base_pix": 8}})
+
+    for name, over in FLAT_CASES.items():
+        torch.manual_seed(0)
+        cfg = flat.SwinTransformerConfig(embed_dim=12, depths=[2, 2], num_heads=[2, 4],
+                                         drop_path_rate=0.0, **over)
+        model = flat.SwinTransformerSys(cfg, FLAT_DS)
+        hooks = [("patch_embed", model.patch_embed)]
+        hooks += [("enc_layer_%d" % i, l) for i, l in enumerate(model.layers)]
+        hooks += [("enc_norm", model.norm)]
+        hooks += [("dec_layer_up_%d" % i, l) for i, l in enumerate(model.layers_up)]
+        hooks += [("dec_norm_up", model.norm_up), ("dec_up", model.up)]
+        run_model(name, model, randn(2, 3, 32, 64), hooks,
+                  {"overrides": over, "embed_dim": 12, "depths": [2, 2], "num_heads": [2, 4],
+                   "data_spec": {"dim_in": [32, 64], "f_in": 3, "f_out": 5}})
 
 
 if __name__ == "__main__":
