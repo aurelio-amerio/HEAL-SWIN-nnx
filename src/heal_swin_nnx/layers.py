@@ -1,4 +1,4 @@
-"""Shared leaf modules (identical between HP and flat models in the reference)."""
+"""Shared leaf modules and RoPE primitives used by both models."""
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -46,3 +46,43 @@ class Mlp(nnx.Module):
         x = self.fc2(x)
         x = self.drop(x)
         return x
+
+
+LN_EPS = 1e-5  # torch nn.LayerNorm default; flax default (1e-6) differs
+
+
+def init_rope_freqs(head_dim, num_heads, theta, key=None):
+    """(2, num_heads, head_dim // 2) x/y RoPE frequency magnitudes.
+
+    rope-vit init_random_2d_freqs: ``key=None`` gives axis-aligned frequencies
+    (rope_axial — first D/4 pairs rotate with x, second D/4 with y, all heads
+    identical); a PRNG key applies a random per-head rotation of the two axes
+    (rope_mixed init)."""
+    assert head_dim % 4 == 0, "RoPE needs head_dim divisible by 4"
+    mag = 1.0 / theta ** (
+        jnp.arange(0, head_dim, 4, dtype=jnp.float32)[: head_dim // 4] / head_dim)
+    if key is None:
+        angles = jnp.zeros((num_heads, 1), dtype=jnp.float32)
+    else:
+        angles = jax.random.uniform(key, (num_heads, 1)) * 2 * jnp.pi
+    fx = jnp.concatenate([mag * jnp.cos(angles), mag * jnp.cos(jnp.pi / 2 + angles)], axis=-1)
+    fy = jnp.concatenate([mag * jnp.sin(angles), mag * jnp.sin(jnp.pi / 2 + angles)], axis=-1)
+    return jnp.stack([fx, fy])
+
+
+def rope_rotation_table(freqs, t_x, t_y):
+    """freqs (2, H, D/2) + coords (N,) -> (H, N, D/2, 2, 2) rotation matrices."""
+    angles = (t_x[None, :, None] * freqs[0][:, None, :]
+              + t_y[None, :, None] * freqs[1][:, None, :])  # (H, N, D/2)
+    cos, sin = jnp.cos(angles), jnp.sin(angles)
+    return jnp.stack([cos, -sin, sin, cos], axis=-1).reshape(*angles.shape, 2, 2)
+
+
+def apply_rope(q, k, table):
+    """Rotate q, k (B, H, N, D) by table (H, N, D/2, 2, 2). Computed in f32
+    (angle precision), returned in the input dtype. Norm-preserving."""
+    def rot(x):
+        xr = x.astype(jnp.float32).reshape(*x.shape[:-1], -1, 1, 2)
+        out = table[..., 0] * xr[..., 0] + table[..., 1] * xr[..., 1]
+        return out.reshape(*x.shape).astype(x.dtype)
+    return rot(q), rot(k)

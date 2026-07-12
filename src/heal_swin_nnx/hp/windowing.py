@@ -60,3 +60,16 @@ def nest_relative_position_index(window_size):
     idx = rel.sum(-1)
     inv = np.argsort(get_nest_win_idcs(window_size).reshape(-1))
     return idx[inv][:, inv]
+
+
+def nest_win_coords(window_size):
+    """(2, window_size) float32: Cartesian (x, y) of each nested-scheme index
+    inside one window — the inverse of ``get_nest_win_idcs``. Used as RoPE
+    token coordinates; same flat-grid approximation as the rel-pos bias."""
+    grid = get_nest_win_idcs(window_size)
+    s = grid.shape[0]
+    coords = np.zeros((2, window_size), dtype=np.float32)
+    xs, ys = np.meshgrid(np.arange(s), np.arange(s), indexing="ij")
+    coords[0, grid.reshape(-1)] = xs.reshape(-1).astype(np.float32)
+    coords[1, grid.reshape(-1)] = ys.reshape(-1).astype(np.float32)
+    return coords
