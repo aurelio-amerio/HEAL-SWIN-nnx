@@ -3,7 +3,10 @@
 A [Flax NNX](https://flax.readthedocs.io/en/latest/nnx/index.html) port of
 [HEAL-SWIN](references/HEAL-SWIN) (a HEALPix-native Swin Transformer U-Net),
 plus the standard flat-grid Swin Transformer it shares code with. Pure
-JAX/Flax; no PyTorch import anywhere in `src/`.
+JAX/Flax; no PyTorch import anywhere in `src/`. The port reached verified
+torch-parity (git tag `parity-verified` holds that state) and then diverged
+deliberately — both models are now Swin V2-only (cosine attention,
+post-norm) with rotary positional embeddings and seam-exact shifted windows.
 
 ## Install
 
@@ -16,27 +19,41 @@ uv sync
 ```python
 import jax.numpy as jnp
 from flax import nnx
-from heal_swin_nnx import DataSpec, SwinHPTransformerConfig, SwinHPTransformerSys
+from heal_swin_nnx import HealSwin, HealSwinParams
 
-cfg = SwinHPTransformerConfig(embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24])
-ds = DataSpec(dim_in=8 * 16 ** 2, f_in=3, f_out=5, base_pix=8)  # npix = base_pix * nside^2
-model = SwinHPTransformerSys(cfg, ds, rngs=nnx.Rngs(0))
+params = HealSwinParams(nside=16, in_channels=3, out_channels=5,
+                        embed_dim=96, depths=(2, 2, 6, 2), num_heads=(3, 6, 12, 24))
+model = HealSwin(params, rngs=nnx.Rngs(0))
 
-x = jnp.ones((2, ds.dim_in, ds.f_in))   # channels-last: (B, N, C)
-y = model(x)                            # (B, ds.dim_in, ds.f_out)
+x = jnp.ones((2, params.npix, params.in_channels))  # channels-last: (B, N, C)
+y = model(x)                                        # (B, params.npix, params.out_channels)
 ```
 
-The flat-grid counterpart mirrors this shape: `SwinTransformerConfig` +
-`DataSpec(dim_in=(H, W), ...)` + `SwinTransformerSys`, with inputs/outputs as
-`(B, H, W, C)`. Both models expose their encoder (`SwinHPEncoder` /
-`SwinEncoder`, returning `(tokens, skips)`) and decoder (`HPUnetDecoder` /
-`UnetDecoder`) standalone, so the encoder can be used without ever building
-decoder parameters.
+`HealSwinParams` is pure, serializable data — `json.dumps(dataclasses.asdict(params))`
+works, so a run's exact configuration can be logged and compared. Notable
+defaults: `shift_strategy="nest_grid_shift_exact"`, `pos_embed="rope_mixed"`.
 
-Public API: `SwinHPTransformerSys`, `SwinHPEncoder`, `HPUnetDecoder`,
-`SwinTransformerSys`, `SwinEncoder`, `UnetDecoder`, `SwinHPTransformerConfig`,
-`SwinTransformerConfig`, `DataSpec`, `Buffer` (the `nnx.Variable` subclass
-used for non-trainable index/mask state, excluded from `nnx.Param` filters).
+### Positional encoding
+
+`pos_embed` selects one of `"none"`, `"rel_bias"` (flat relative-position bias
+table), `"rope_axial"`, or `"rope_mixed"` (rope-vit-style rotary embeddings
+computed on intra-window coordinates; `"rope_mixed"` additionally learns
+per-head rotation frequencies). RoPE requires head dims divisible by 4.
+`HealSwinParams` defaults to `"rope_mixed"`; `SwinParams` defaults to
+`"rel_bias"`.
+
+### Flat-grid model
+
+The flat-grid counterpart mirrors this shape: `SwinParams(img_size=(H, W), ...)`
++ `SwinUnet`, with inputs/outputs as `(B, H, W, C)`. Both models expose their
+encoder (`HealSwinEncoder` / `SwinEncoder`, returning `(tokens, skips)`) and
+decoder (`HealSwinDecoder` / `SwinDecoder`) standalone, so the encoder can be
+used without ever building decoder parameters.
+
+Public API: `HealSwin`, `HealSwinEncoder`, `HealSwinDecoder`, `HealSwinParams`,
+`SwinUnet`, `SwinEncoder`, `SwinDecoder`, `SwinParams`, `Buffer` (the
+`nnx.Variable` subclass used for non-trainable index/mask state, excluded from
+`nnx.Param` filters).
 
 ## Full sphere and partial coverage
 
@@ -45,11 +62,10 @@ that only see part of the sky select the base pixels they cover — e.g. a
 ground-based south-pole telescope observing the four southern faces:
 
 ```python
-from heal_swin_nnx import DataSpec, SwinHPTransformerConfig, SwinHPTransformerSys
+from heal_swin_nnx import HealSwinParams
 
-nside = 256
-data_spec = DataSpec(dim_in=4 * nside**2, f_in=1, f_out=1, base_pixels=[8, 9, 10, 11])
-config = SwinHPTransformerConfig(shift_strategy="nest_grid_shift_exact")
+params = HealSwinParams(nside=256, in_channels=1, out_channels=1,
+                        base_pixels=(8, 9, 10, 11))  # south polar cap
 ```
 
 Inputs are the concatenation of the selected faces' NEST-ordered pixels.
@@ -71,36 +87,22 @@ Shift strategies:
 uv run pytest tests/ -q
 ```
 
-Covers: bit-exact HEALPix shifting/windowing indices and masks against the
-reference (`test_shifting.py`, `test_windowing.py`), buffer/param separation
-(`test_buffers.py`), module- and full-model forward + gradient parity against
-golden fixtures generated from the pinned reference implementation
-(`test_parity_modules.py`, `test_parity_e2e.py`), and JAX-native behavior —
-jit/eager equivalence, batch independence, `nnx.remat` matching non-remat,
-standalone encoder, all three HEALPix shift strategies (`base_pix=12` with
-`nest_roll`, `NotImplementedError` for `nest_grid_shift`), and buffers never
-leaking into `nnx.Param` state (`test_model.py`).
-
-## Parity
-
-Golden fixtures (`tests/goldens/*.npz`) are generated once from the pinned
-legacy reference environment (Python 3.8, torch 1.8.0+cpu, timm 0.4.12,
-healpy 1.15.2) and committed; the main test suite only reads them, it never
-needs torch. Forward outputs match to `rtol=atol=1e-4`; gradients to
-`rtol=1e-3, atol=1e-4` (three ill-conditioned float32 cases — `hp_ring`,
-`hp_cos_v2`, `flat_cos_v2` — are documented and individually loosened in
-`tests/test_parity_e2e.py`). `tests/test_parity_f64.py` reruns those three
-sensitive cases (plus two controls) against float64 goldens under
-`jax_enable_x64`, matching to ~1e-9; since both implementations agree that
-tightly once precision noise is removed, the loosened float32 tolerances are
-confirmed to be precision-only, not an algorithmic gap. See
-[`parity/README.md`](parity/README.md) for how the fixtures are (re)generated
-and the reference clamp-bug patch that generation requires.
+Covers: ground-truth geometry checks against healpy adjacency
+(`test_topology.py`, `test_seam_geometry.py`); permutation/round-trip
+invariants for shifting and windowing (`test_shifting.py`,
+`test_windowing.py`); RoPE property tests — coordinate-frame round-trips and
+rotation-table invariants (`test_rope.py`); param validation and
+serialization (`test_params.py`); buffer/param separation
+(`test_buffers.py`); and JAX-native behavior — jit/eager equivalence, batch
+independence, `nnx.remat` matching non-remat, standalone encoder, and all
+HEALPix shift strategies (`test_model.py`).
 
 ## Design docs
 
 - [`docs/superpowers/specs/2026-07-12-healswin-nnx-port-design.md`](docs/superpowers/specs/2026-07-12-healswin-nnx-port-design.md) —
-  design spec (module surface, config/DataSpec shape, buffer strategy,
-  shift-strategy semantics, parity approach).
+  original port design spec (module surface, config shape, buffer strategy,
+  shift-strategy semantics).
 - [`docs/superpowers/plans/2026-07-12-healswin-nnx-port.md`](docs/superpowers/plans/2026-07-12-healswin-nnx-port.md) —
-  the task-by-task implementation plan this port followed.
+  the task-by-task implementation plan the port followed.
+- [`docs/superpowers/specs/2026-07-12-config-cleanup-design.md`](docs/superpowers/specs/2026-07-12-config-cleanup-design.md) —
+  design spec for the config unification, cleanup, and RoPE work that followed.
