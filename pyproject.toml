@@ -18,6 +18,10 @@ dependencies = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-n 2"
+env = [
+    "JAX_PLATFORMS=cpu"
+]
 
 [dependency-groups]
 dev = [

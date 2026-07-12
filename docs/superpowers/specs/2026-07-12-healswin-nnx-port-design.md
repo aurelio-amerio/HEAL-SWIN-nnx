@@ -282,3 +282,4 @@ Pass-1 requirements serving this extension:
 3. JAX-native tests parameterize over `base_pix` wherever code is already
    general, so the extension only needs new shifter tests.
 4. Parity goldens remain `base_pix=8` (all the reference can produce).
+d
