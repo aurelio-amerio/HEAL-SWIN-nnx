@@ -255,3 +255,30 @@ Once goldens are green: optional idiomatic API redesign (renaming, unified
 config, head library — pooling/classification, diffusion-conditioning
 adapters), performed as behavior-preserving refactors guarded by the golden
 suite. Only ongoing cost: keep the weight-mapping table in sync.
+
+## Full-sphere extension (planned immediately after parity)
+
+Target use case: cosmological data on the **full sphere** (all 12 HEALPix base
+pixels) or an arbitrary subset of base pixels. The reference is wired for the
+8-base-pixel fisheye subset. Where that assumption lives:
+
+- `base_pix` already parameterizes the model (`N = base_pix · nside²`);
+  windowing, merge/expand, attention, encoder, decoder are subset-agnostic.
+- `NestRollShift` (default) is already valid for any `base_pix`, including 12.
+- `NestGridShift`: `assert base_pix == 8` plus two `BASE_PIX_OFFSETS` tables
+  encoding cross-base-pixel window adjacency for the 8-pixel subset.
+- `RingShift`: `MASKED_BASE_PIX`, `LEFT_CARRY_OVER_BASE_PIX`, `GET_LOST_FROM`
+  constants encode the same subset topology. Its ring↔nest core is already
+  full-sphere; the masking/backfill logic is subset-specific (and partially
+  vanishes on a boundary-free full sphere).
+
+Pass-1 requirements serving this extension:
+
+1. Shifter topology constants are isolated as explicit module-level data
+   (tables keyed by base-pixel subset), never inlined in traversal logic, so
+   new derivations plug in without touching the model.
+2. Every 8-pixel assumption sits behind a loud, documented assert at the seam
+   (including adding the assert `RingShift` is currently missing).
+3. JAX-native tests parameterize over `base_pix` wherever code is already
+   general, so the extension only needs new shifter tests.
+4. Parity goldens remain `base_pix=8` (all the reference can produce).
