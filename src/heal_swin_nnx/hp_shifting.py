@@ -193,3 +193,82 @@ class NestGridShift(nnx.Module):
 
     def shift_back(self, x):
         return jnp.take(x, self.back_shift_idcs.value, axis=1)
+
+
+# --- ring topology (healpy ring coordinate, cross-base-pixel wrapping) ---
+RING_GET_LOST_FROM = {8: {4: 7, 5: 4, 6: 5, 7: 6}}
+
+
+def ring_shift_idcs_and_mask(nside, base_pix, window_size, shift_size):
+    import healpy as hp  # local import: healpy pulls matplotlib; keep module import light
+
+    npix = base_pix * nside ** 2
+    get_lost_from = RING_GET_LOST_FROM[base_pix]
+
+    ring_idcs = np.arange(12 * nside ** 2)
+    shifted_ring_idcs = np.roll(ring_idcs, shift_size)
+    shifted_ring_idcs_in_nest = hp.pixelfunc.ring2nest(nside, shifted_ring_idcs)
+
+    nest_idcs = np.arange(npix)
+    nest_idcs_in_ring = hp.pixelfunc.nest2ring(nside, nest_idcs)
+    result = shifted_ring_idcs_in_nest[nest_idcs_in_ring]
+
+    max_idx = nest_idcs.max()
+    pixel_size = nside ** 2
+    mask = np.zeros(npix)
+    for i in range(base_pix):
+        subset_slice = slice(i * pixel_size, (i + 1) * pixel_size)
+        mask_subset = mask[subset_slice]
+        result_subset = result[subset_slice]
+        mask_subset[result_subset > max_idx] = i + 1
+
+    lost_pix = []
+    for i in range(base_pix):
+        lost_pix.append(np.setdiff1d(np.arange(i * pixel_size, (i + 1) * pixel_size), result))
+
+    unused_source_pix = []
+    for i in range(4, base_pix):
+        subset_slice = slice(i * pixel_size, (i + 1) * pixel_size)
+        result_subset = result[subset_slice]
+        source_pix = lost_pix[get_lost_from[i]]
+        pix_to_be_filled = result_subset[result_subset > max_idx]
+        assert pix_to_be_filled.shape[0] <= source_pix.shape[0], (
+            "for base pixel %d, there were not enough source pixel" % i)
+        result_subset[result_subset > max_idx] = source_pix[:pix_to_be_filled.shape[0]]
+        unused_source_pix.append(source_pix[pix_to_be_filled.shape[0]:])
+    unused_pix = np.concatenate(unused_source_pix).flatten()
+
+    assert unused_pix.shape[0] == (result > max_idx).sum(), (
+        "the number of unused source pixels does not match the number of pixels to be filled")
+    first = 0
+    for i in range(4):
+        subset_slice = slice(i * pixel_size, (i + 1) * pixel_size)
+        result_subset = result[subset_slice]
+        no_to_be_filled = result_subset[result_subset > max_idx].shape[0]
+        result_subset[result_subset > max_idx] = unused_pix[first:first + no_to_be_filled]
+        first += no_to_be_filled
+
+    result = result.astype(np.int64)
+    assert np.array_equal(np.sort(result), np.arange(npix)), (
+        "shift validation failed for nside=%d, window_size=%d" % (nside, window_size))
+    return result, mask.astype(np.int64)
+
+
+class RingShift(nnx.Module):
+    def __init__(self, nside, base_pix, window_size, shift_size):
+        # The reference silently assumes base_pix == 8 here; we assert loudly (spec).
+        if base_pix not in RING_GET_LOST_FROM:
+            raise NotImplementedError(
+                "RingShift backfill tables only exist for base_pix in %s; "
+                "full-sphere support is a planned extension (see design spec)"
+                % sorted(RING_GET_LOST_FROM))
+        idcs, raw_mask = ring_shift_idcs_and_mask(nside, base_pix, window_size, shift_size)
+        self.shift_idcs = Buffer(jnp.asarray(idcs))
+        self.back_shift_idcs = Buffer(jnp.asarray(np.argsort(idcs)))
+        self.attn_mask = Buffer(jnp.asarray(get_attn_mask_from_mask(raw_mask, window_size)))
+
+    def shift(self, x):
+        return jnp.take(x, self.shift_idcs.value, axis=1)
+
+    def shift_back(self, x):
+        return jnp.take(x, self.back_shift_idcs.value, axis=1)
