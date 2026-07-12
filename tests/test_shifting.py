@@ -1,6 +1,5 @@
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from heal_swin_nnx import hp_shifting as hps
 from tests.parity_utils import load_case
@@ -87,7 +86,7 @@ def test_ring_idcs_and_masks_bit_exact():
             tag = "ns%d_ws%d" % (nside, ws)
             if "ring/idcs/%s" % tag not in npz.files:
                 continue
-            idcs, raw = hps.ring_shift_idcs_and_mask(nside, 8, ws, ws // 2)
+            idcs, raw = hps.ring_shift_idcs_and_mask(nside, list(range(8)), ws, ws // 2)
             assert np.array_equal(idcs, npz["ring/idcs/%s" % tag]), tag
             assert np.array_equal(np.argsort(idcs), npz["ring/back/%s" % tag]), tag
             assert np.array_equal(raw, npz["ring/mask_raw/%s" % tag]), tag
@@ -95,12 +94,12 @@ def test_ring_idcs_and_masks_bit_exact():
             assert np.array_equal(attn, npz["ring/attn_mask/%s" % tag]), tag
 
 
-def test_ring_module_and_unsupported_base_pix():
-    sh = hps.RingShift(nside=16, base_pix=8, window_size=4, shift_size=2)
-    x = jnp.arange(1 * 2048 * 2, dtype=jnp.float32).reshape(1, 2048, 2)
-    assert np.array_equal(sh.shift_back(sh.shift(x)), x)
-    with pytest.raises(NotImplementedError):
-        hps.RingShift(nside=16, base_pix=12, window_size=4, shift_size=2)
+def test_ring_module_roundtrip_full_sphere_and_subsets():
+    for base_pixels in (list(range(12)), list(range(8)), [8, 9, 10, 11], [0, 4, 8]):
+        npix = len(base_pixels) * 16 ** 2
+        sh = hps.RingShift(nside=16, base_pixels=base_pixels, window_size=4, shift_size=2)
+        x = jnp.arange(1 * npix * 2, dtype=jnp.float32).reshape(1, npix, 2)
+        assert np.array_equal(sh.shift_back(sh.shift(x)), x), base_pixels
 
 
 def test_nest_grid_module_roundtrip_full_sphere_and_subsets():
@@ -147,3 +146,23 @@ def test_nest_grid_mask_ground_truth_full_sphere_and_south_cap():
                         neigh = set(int(v) for v in
                                     hp.get_all_neighbours(nside, p, nest=True) if v >= 0)
                         assert q in neigh, "window %d slots %d-%d: %d !~ %d" % (w, a, b, p, q)
+
+
+def test_ring_full_sphere_is_pure_permutation_no_mask():
+    idcs, raw = hps.ring_shift_idcs_and_mask(8, list(range(12)), 4, 2)
+    assert np.array_equal(np.sort(idcs), np.arange(12 * 8 ** 2))
+    assert not raw.any()
+
+
+def test_ring_subset_masks_out_of_domain_sources():
+    import healpy as hp
+    nside, base_pixels = 8, [8, 9, 10, 11]
+    idcs, raw = hps.ring_shift_idcs_and_mask(nside, base_pixels, 4, 2)
+    # every masked pixel is one whose true ring-shift source lies outside the subset
+    ring = np.arange(12 * nside ** 2)
+    full = hp.pixelfunc.ring2nest(nside, np.roll(ring, 2))[
+        hp.pixelfunc.nest2ring(nside, np.arange(12 * nside ** 2))]
+    from heal_swin_nnx import hp_topology as hpt
+    sel = hpt.local_to_global(base_pixels, nside, np.arange(len(idcs)))
+    out_of_domain = hpt.global_to_local(base_pixels, nside, full[sel]) < 0
+    assert np.array_equal(raw > 0, out_of_domain)

@@ -217,6 +217,24 @@ def derive_mask_faces(base_pixels, nside, window_size, shift_idcs):
     return masked, carry
 
 
+def derive_ring_lost_from(base_pixels):
+    """RingShift backfill donor map (local positions): each face takes lost
+    pixels from its same-latitude-row cyclic predecessor, except faces in the
+    northernmost selected row, which are filled from the leftover pool. This
+    reproduces the reference's {4:7, 5:4, 6:5, 7:6} for [0..7]."""
+    base_pixels = list(base_pixels)
+    rows = sorted({b // 4 for b in base_pixels})
+    out = {}
+    for i, b in enumerate(base_pixels):
+        if b // 4 == rows[0]:
+            continue
+        sibs = [f for f in base_pixels if f // 4 == b // 4]
+        if len(sibs) < 2:
+            continue
+        out[i] = base_pixels.index(sibs[(sibs.index(b) - 1) % len(sibs)])
+    return out
+
+
 def derive_offset_tables(base_pixels):
     """dir1/dir2 base-pixel offset tables for the NEST grid shift, keyed by
     local face position. A face whose source neighbour is outside base_pixels

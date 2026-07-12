@@ -152,8 +152,11 @@ class SwinTransformerBlock(nnx.Module):
                 self.shifter = hp_shifting.NestGridShift(
                     nside=nside, base_pixels=list(range(base_pix)), window_size=self.window_size)
             elif shift_strategy == "ring_shift":
+                # base_pix here is still the legacy pixel *count*; the 0..base_pix-1
+                # face-id sequence matches the reference 8-base-pixel fisheye subset.
+                # Task 6+ threads an explicit base_pixels sequence through this class.
                 self.shifter = hp_shifting.RingShift(
-                    nside=nside, base_pix=base_pix, window_size=self.window_size,
+                    nside=nside, base_pixels=list(range(base_pix)), window_size=self.window_size,
                     shift_size=self.shift_size)
             else:
                 raise ValueError("unknown shift_strategy %r" % shift_strategy)

@@ -79,3 +79,7 @@ def test_derive_mask_faces_reproduces_reference_8pix():
     masked, carry = hpt.derive_mask_faces(base_pixels, nside, ws, idcs)
     assert masked == [4, 5, 6, 7]
     assert carry == [0, 1, 2, 3]
+
+
+def test_derive_ring_lost_from_reproduces_reference_8pix():
+    assert hpt.derive_ring_lost_from(list(range(8))) == {4: 7, 5: 4, 6: 5, 7: 6}

@@ -194,62 +194,57 @@ class NestGridShift(nnx.Module):
 
 
 # --- ring topology (healpy ring coordinate, cross-base-pixel wrapping) ---
-RING_GET_LOST_FROM = {8: {4: 7, 5: 4, 6: 5, 7: 6}}
-
-
-def ring_shift_idcs_and_mask(nside, base_pix, window_size, shift_size):
+def ring_shift_idcs_and_mask(nside, base_pixels, window_size, shift_size):
     import healpy as hp  # local import: healpy pulls matplotlib; keep module import light
 
-    npix = base_pix * nside ** 2
-    get_lost_from = RING_GET_LOST_FROM[base_pix]
-
-    ring_idcs = np.arange(12 * nside ** 2)
-    shifted_ring_idcs = np.roll(ring_idcs, shift_size)
-    shifted_ring_idcs_in_nest = hp.pixelfunc.ring2nest(nside, shifted_ring_idcs)
-
-    nest_idcs = np.arange(npix)
-    nest_idcs_in_ring = hp.pixelfunc.nest2ring(nside, nest_idcs)
-    result = shifted_ring_idcs_in_nest[nest_idcs_in_ring]
-
-    max_idx = nest_idcs.max()
+    base_pixels = list(base_pixels)
+    n = len(base_pixels)
     pixel_size = nside ** 2
+    npix = n * pixel_size
+
+    # roll on the full 12-face sphere in ring order, then restrict to the subset
+    ring_idcs = np.arange(12 * pixel_size)
+    shifted_ring_idcs_in_nest = hp.pixelfunc.ring2nest(nside, np.roll(ring_idcs, shift_size))
+    full_result = shifted_ring_idcs_in_nest[
+        hp.pixelfunc.nest2ring(nside, np.arange(12 * pixel_size))]
+    sel = hp_topology.local_to_global(base_pixels, nside, np.arange(npix))
+    result = hp_topology.global_to_local(base_pixels, nside, full_result[sel])
+
     mask = np.zeros(npix)
-    for i in range(base_pix):
-        subset_slice = slice(i * pixel_size, (i + 1) * pixel_size)
-        mask_subset = mask[subset_slice]
-        result_subset = result[subset_slice]
-        mask_subset[result_subset > max_idx] = i + 1
+    for i in range(n):
+        sl = slice(i * pixel_size, (i + 1) * pixel_size)
+        mask[sl][result[sl] < 0] = i + 1
 
-    lost_pix = []
-    for i in range(base_pix):
-        lost_pix.append(np.setdiff1d(np.arange(i * pixel_size, (i + 1) * pixel_size), result))
+    lost_pix = [np.setdiff1d(np.arange(i * pixel_size, (i + 1) * pixel_size), result)
+                for i in range(n)]
+    get_lost_from = hp_topology.derive_ring_lost_from(base_pixels)
 
-    # base pixels 4..7 are the masked/backfilled subset, 0..3 carry over unchanged; this is the
-    # 8-base-pixel subset topology guarded by the NotImplementedError above. Full-sphere (phase 2)
-    # must derive these ranges from the topology tables instead of hardcoding them.
-    unused_source_pix = []
-    for i in range(4, base_pix):
-        subset_slice = slice(i * pixel_size, (i + 1) * pixel_size)
-        result_subset = result[subset_slice]
+    # first pass: donor-fed faces (reference behaviour for its faces 4..7)
+    leftover, donated = [], set()
+    for i in range(n):
+        if i not in get_lost_from:
+            continue
+        sl = slice(i * pixel_size, (i + 1) * pixel_size)
+        result_subset = result[sl]
+        holes = np.where(result_subset < 0)[0]
         source_pix = lost_pix[get_lost_from[i]]
-        pix_to_be_filled = result_subset[result_subset > max_idx]
-        assert pix_to_be_filled.shape[0] <= source_pix.shape[0], (
-            "for base pixel %d, there were not enough source pixel" % i)
-        result_subset[result_subset > max_idx] = source_pix[:pix_to_be_filled.shape[0]]
-        unused_source_pix.append(source_pix[pix_to_be_filled.shape[0]:])
-    unused_pix = np.concatenate(unused_source_pix).flatten()
+        donated.add(get_lost_from[i])
+        take = min(holes.shape[0], source_pix.shape[0])
+        result_subset[holes[:take]] = source_pix[:take]
+        leftover.append(source_pix[take:])
+    # pool: donor remainders (reference order), then lost pixels of never-donor faces
+    pool = np.concatenate(
+        leftover + [lost_pix[i] for i in range(n) if i not in donated]
+        or [np.array([], dtype=np.int64)]).astype(np.int64)
 
-    assert unused_pix.shape[0] == (result > max_idx).sum(), (
-        "the number of unused source pixels does not match the number of pixels to be filled")
-    # Same 8-base-pixel subset topology as above: only base pixels 0..3 receive the leftover
-    # unused source pixels. Full-sphere (phase 2) must derive this range from the topology tables.
+    # second pass: remaining holes in face order (reference behaviour for faces 0..3)
     first = 0
-    for i in range(4):
-        subset_slice = slice(i * pixel_size, (i + 1) * pixel_size)
-        result_subset = result[subset_slice]
-        no_to_be_filled = result_subset[result_subset > max_idx].shape[0]
-        result_subset[result_subset > max_idx] = unused_pix[first:first + no_to_be_filled]
-        first += no_to_be_filled
+    for i in range(n):
+        sl = slice(i * pixel_size, (i + 1) * pixel_size)
+        result_subset = result[sl]
+        holes = np.where(result_subset < 0)[0]
+        result_subset[holes] = pool[first:first + holes.shape[0]]
+        first += holes.shape[0]
 
     result = result.astype(np.int64)
     assert np.array_equal(np.sort(result), np.arange(npix)), (
@@ -258,14 +253,9 @@ def ring_shift_idcs_and_mask(nside, base_pix, window_size, shift_size):
 
 
 class RingShift(nnx.Module):
-    def __init__(self, nside, base_pix, window_size, shift_size):
-        # The reference silently assumes base_pix == 8 here; we assert loudly (spec).
-        if base_pix not in RING_GET_LOST_FROM:
-            raise NotImplementedError(
-                "RingShift backfill tables only exist for base_pix in %s; "
-                "full-sphere support is a planned extension (see design spec)"
-                % sorted(RING_GET_LOST_FROM))
-        idcs, raw_mask = ring_shift_idcs_and_mask(nside, base_pix, window_size, shift_size)
+    def __init__(self, nside, base_pixels, window_size, shift_size):
+        idcs, raw_mask = ring_shift_idcs_and_mask(nside, list(base_pixels),
+                                                  window_size, shift_size)
         self.shift_idcs = Buffer(jnp.asarray(idcs))
         self.back_shift_idcs = Buffer(jnp.asarray(np.argsort(idcs)))
         self.attn_mask = Buffer(jnp.asarray(get_attn_mask_from_mask(raw_mask, window_size)))
