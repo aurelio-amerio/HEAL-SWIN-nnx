@@ -1,4 +1,6 @@
 """HEAL-SWIN on the HEALPix grid. Port of models_torch/swin_hp_transformer.py."""
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -110,3 +112,126 @@ class FinalPatchExpand_X4(nnx.Module):
         C = x.shape[-1]
         x = rearrange(x, "b n (p c) -> b (n p) c", p=self.patch_size, c=C // self.patch_size)
         return self.norm(x)
+
+
+class SwinTransformerBlock(nnx.Module):
+    def __init__(self, dim, input_resolution, base_pix, num_heads, window_size=4, shift_size=0,
+                 shift_strategy="nest_roll", rel_pos_bias=None, mlp_ratio=4.0, qkv_bias=True,
+                 qk_scale=None, drop=0.0, attn_drop=0.0, drop_path=0.0,
+                 use_v2_norm_placement=False, use_cos_attn=False, *, rngs):
+        self.input_resolution = input_resolution
+        self.use_v2_norm_placement = use_v2_norm_placement
+        self.window_size = window_size
+        self.shift_size = shift_size
+        if self.input_resolution <= self.window_size:
+            self.shift_size = 0
+            self.window_size = self.input_resolution
+
+        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
+        self.attn = WindowAttention(dim, window_size=self.window_size, num_heads=num_heads,
+                                    rel_pos_bias=rel_pos_bias, qkv_bias=qkv_bias,
+                                    qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
+                                    use_cos_attn=use_cos_attn, rngs=rngs)
+        self.drop_path = DropPath(drop_path, rngs=rngs) if drop_path > 0.0 else Identity()
+        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
+        self.mlp = Mlp(dim, int(dim * mlp_ratio), drop=drop, rngs=rngs)
+
+        nside = math.sqrt(input_resolution // base_pix)
+        assert nside % 1 == 0, "nside has to be an integer in every layer"
+        nside = int(nside)
+
+        if self.shift_size > 0:
+            if shift_strategy == "nest_roll":
+                self.shifter = hp_shifting.NestRollShift(
+                    shift_size=self.shift_size, input_resolution=self.input_resolution,
+                    window_size=self.window_size)
+            elif shift_strategy == "nest_grid_shift":
+                self.shifter = hp_shifting.NestGridShift(
+                    nside=nside, base_pix=base_pix, window_size=self.window_size)
+            elif shift_strategy == "ring_shift":
+                self.shifter = hp_shifting.RingShift(
+                    nside=nside, base_pix=base_pix, window_size=self.window_size,
+                    shift_size=self.shift_size)
+            else:
+                raise ValueError("unknown shift_strategy %r" % shift_strategy)
+        else:
+            self.shifter = hp_shifting.NoShift()
+
+    def __call__(self, x):
+        shortcut = x
+        if not self.use_v2_norm_placement:
+            x = self.norm1(x)
+
+        shifted_x = self.shifter.shift(x)
+        x_windows = window_partition(shifted_x, self.window_size)
+        mask = None if self.shifter.attn_mask is None else self.shifter.attn_mask.value
+        attn_windows = self.attn(x_windows, mask=mask)
+        shifted_x = window_reverse(attn_windows, self.window_size, self.input_resolution)
+        x = self.shifter.shift_back(shifted_x)
+
+        if self.use_v2_norm_placement:
+            x = shortcut + self.drop_path(self.norm1(x))
+            x = x + self.drop_path(self.norm2(self.mlp(x)))
+        else:
+            x = shortcut + self.drop_path(x)
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+        return x
+
+
+def _make_blocks(dim, input_resolution, base_pix, depth, num_heads, window_size, shift_size,
+                 shift_strategy, rel_pos_bias, mlp_ratio, qkv_bias, qk_scale, drop, attn_drop,
+                 drop_path, use_v2_norm_placement, use_cos_attn, rngs):
+    return [SwinTransformerBlock(
+        dim=dim, input_resolution=input_resolution, base_pix=base_pix, num_heads=num_heads,
+        window_size=window_size, shift_size=0 if (i % 2 == 0) else shift_size,
+        shift_strategy=shift_strategy, rel_pos_bias=rel_pos_bias, mlp_ratio=mlp_ratio,
+        qkv_bias=qkv_bias, qk_scale=qk_scale, drop=drop, attn_drop=attn_drop,
+        drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+        use_v2_norm_placement=use_v2_norm_placement, use_cos_attn=use_cos_attn, rngs=rngs)
+        for i in range(depth)]
+
+
+class BasicLayer(nnx.Module):
+    def __init__(self, dim, input_resolution, depth, num_heads, window_size, base_pix,
+                 shift_size, shift_strategy, rel_pos_bias, mlp_ratio=4.0, qkv_bias=True,
+                 qk_scale=None, drop=0.0, attn_drop=0.0, drop_path=0.0, downsample=False,
+                 use_checkpoint=False, use_v2_norm_placement=False, use_cos_attn=False, *, rngs):
+        self.use_checkpoint = use_checkpoint
+        self.blocks = _make_blocks(dim, input_resolution, base_pix, depth, num_heads,
+                                   window_size, shift_size, shift_strategy, rel_pos_bias,
+                                   mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path,
+                                   use_v2_norm_placement, use_cos_attn, rngs)
+        self.downsample = PatchMerging(dim=dim, rngs=rngs) if downsample else None
+
+    def __call__(self, x):
+        for blk in self.blocks:
+            if self.use_checkpoint:
+                x = nnx.remat(type(blk).__call__)(blk, x)
+            else:
+                x = blk(x)
+        if self.downsample is not None:
+            x = self.downsample(x)
+        return x
+
+
+class BasicLayer_up(nnx.Module):
+    def __init__(self, dim, input_resolution, depth, num_heads, window_size, base_pix,
+                 shift_size, shift_strategy, rel_pos_bias, mlp_ratio=4.0, qkv_bias=True,
+                 qk_scale=None, drop=0.0, attn_drop=0.0, drop_path=0.0, upsample=False,
+                 use_checkpoint=False, use_v2_norm_placement=False, use_cos_attn=False, *, rngs):
+        self.use_checkpoint = use_checkpoint
+        self.blocks = _make_blocks(dim, input_resolution, base_pix, depth, num_heads,
+                                   window_size, shift_size, shift_strategy, rel_pos_bias,
+                                   mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path,
+                                   use_v2_norm_placement, use_cos_attn, rngs)
+        self.upsample = PatchExpand(dim=dim, dim_scale=2, rngs=rngs) if upsample else None
+
+    def __call__(self, x):
+        for blk in self.blocks:
+            if self.use_checkpoint:
+                x = nnx.remat(type(blk).__call__)(blk, x)
+            else:
+                x = blk(x)
+        if self.upsample is not None:
+            x = self.upsample(x)
+        return x

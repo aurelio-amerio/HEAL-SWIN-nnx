@@ -101,3 +101,29 @@ def test_hp_patch_merge_expand_parity():
     m = hp.FinalPatchExpand_X4(patch_size=meta["patch_size"], dim=meta["dim"], rngs=nnx.Rngs(0))
     load_torch_state(m, state_dict_of(npz))
     _leaf_forward_and_grads(m, npz, param_grad_tol=noise_tol)
+
+
+def test_hp_block_parity_all_shifters():
+    for case in ("leaf_hp_block_noshift", "leaf_hp_block_nestroll",
+                 "leaf_hp_block_grid", "leaf_hp_block_ring"):
+        npz, meta = load_case(case)
+        m = hp.SwinTransformerBlock(
+            dim=meta["dim"], input_resolution=meta["input_resolution"],
+            base_pix=meta["base_pix"], num_heads=meta["num_heads"],
+            window_size=meta["window_size"], shift_size=meta["shift_size"],
+            shift_strategy=meta.get("shift_strategy", "nest_roll"), rngs=nnx.Rngs(0))
+        load_torch_state(m, state_dict_of(npz))
+        m.eval()
+        x = jnp.asarray(npz["input"])
+        np.testing.assert_allclose(np.asarray(m(x)), npz["output"], err_msg=case, **FWD)
+        gx = jax.grad(lambda x: m(x).sum())(x)
+        np.testing.assert_allclose(np.asarray(gx), npz["input_grad"], err_msg=case, **GRD)
+        gp = nnx.grad(lambda m: m(x).sum())(m)
+        # qkv key-projection grads are analytically ~0 (softmax is shift-invariant: a
+        # key-side bias shifts all logits for a query uniformly), so goldens hold ~1e-7
+        # framework-specific noise there; atol loosened to 1e-5 for param grads in this
+        # test only (measured max violation 3.4e-6, 3x margin) — real block param grads
+        # are O(1e-2..1e3), far above this floor
+        check_param_grads(gp, grads_of(npz), tol=dict(rtol=1e-4, atol=1e-5))
+        if "sd/attn_mask" in npz.files:  # block-level buffer parity, bit-exact
+            assert np.array_equal(np.asarray(m.shifter.attn_mask.value), npz["sd/attn_mask"])
