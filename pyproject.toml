@@ -12,7 +12,7 @@ dependencies = [
     "einops>=0.8.2",
     "flax>=0.12.7",
     "healpy>=1.19.0",
-    "jax[cuda12]>=0.10.2",
+    "jax>=0.10.2",
     "numpy>=2.5.1",
 ]
 
@@ -37,4 +37,13 @@ examples = [
     "datasets>=5.0.0",
     "matplotlib>=3.9.0",
     "scipy>=1.15.0",
+]
+
+cuda12 = [
+    "jax[cuda12]>=0.10.2",
+    "nvidia-cudnn-cu12<9.11.0",
+]
+
+cuda13 = [
+    "jax[cuda13]>=0.10.2"
 ]

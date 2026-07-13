@@ -10,7 +10,7 @@ from flax import nnx
 
 from heal_swin_nnx.layers import (
     LN_EPS, TRUNC_NORMAL, DropPath, Identity, Mlp, apply_rope, init_rope_freqs,
-    rope_rotation_table)
+    l2_normalize, rope_rotation_table)
 from heal_swin_nnx.models.healswin import POS_EMBEDS
 from heal_swin_nnx.variables import Buffer
 
@@ -175,8 +175,8 @@ class WindowAttention(nnx.Module):
         qkv = qkv.transpose(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        q = q / jnp.maximum(jnp.linalg.norm(q, axis=-1, keepdims=True), 1e-12)
-        k = k / jnp.maximum(jnp.linalg.norm(k, axis=-1, keepdims=True), 1e-12)
+        q = l2_normalize(q)
+        k = l2_normalize(k)
         if self.pos_embed == "rope_mixed":
             coords = self.rope_coords[...]
             table = rope_rotation_table(self.rope_freqs[...], coords[0], coords[1])

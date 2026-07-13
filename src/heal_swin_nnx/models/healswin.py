@@ -14,7 +14,8 @@ from heal_swin_nnx.hp.windowing import (
     nest_relative_position_index, nest_win_coords, window_partition, window_reverse)
 from heal_swin_nnx.layers import (
     LN_EPS, TRUNC_NORMAL, DropPath, FinalPatchExpand, Identity, Mlp, PatchEmbed,
-    PatchExpand, PatchMerging, apply_rope, init_rope_freqs, rope_rotation_table)
+    PatchExpand, PatchMerging, apply_rope, init_rope_freqs, l2_normalize,
+    rope_rotation_table)
 from heal_swin_nnx.variables import Buffer
 
 POS_EMBEDS = ("none", "rel_bias", "rope_axial", "rope_mixed")
@@ -172,8 +173,8 @@ class WindowAttention(nnx.Module):
         qkv = qkv.transpose(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        q = q / jnp.maximum(jnp.linalg.norm(q, axis=-1, keepdims=True), 1e-12)
-        k = k / jnp.maximum(jnp.linalg.norm(k, axis=-1, keepdims=True), 1e-12)
+        q = l2_normalize(q)
+        k = l2_normalize(k)
         if self.pos_embed == "rope_mixed":
             coords = self.rope_coords[...]
             table = rope_rotation_table(self.rope_freqs[...], coords[0], coords[1])

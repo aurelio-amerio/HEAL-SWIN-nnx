@@ -17,11 +17,11 @@ request_cpus   = 8
 request_memory = 32 GB
 request_gpus   = 1
 
-+UseNvidiaV100 = True
++UseNvidiaA100 = True
 
 
-log    = condor_logs/mnist_healpix_classify.log
-output = condor_logs/mnist_healpix_classify.out
-error  = condor_logs/mnist_healpix_classify.err
+log    = condor_logs/mnist_healpix_classify_a100.log
+output = condor_logs/mnist_healpix_classify_a100.out
+error  = condor_logs/mnist_healpix_classify_a100.err
 
 queue

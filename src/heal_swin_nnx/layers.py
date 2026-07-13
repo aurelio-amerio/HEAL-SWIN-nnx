@@ -11,6 +11,18 @@ from flax import nnx
 TRUNC_NORMAL = nnx.initializers.truncated_normal(stddev=0.02)
 
 
+def l2_normalize(x, axis=-1, eps=1e-12):
+    """L2-normalize with a finite gradient at x = 0.
+
+    ``x / max(||x||, eps)`` NaNs in the backward pass for exactly-zero vectors
+    (d/dx ||x|| is 0/0 at x = 0, and the clamp doesn't block the NaN), which
+    zero-background inputs reach through the zero-initialized biases ahead of
+    the first attention block. ``rsqrt(sum(x^2) + eps)`` is smooth at 0 and
+    matches the clamped division everywhere else.
+    """
+    return x * jax.lax.rsqrt(jnp.sum(jnp.square(x), axis=axis, keepdims=True) + eps)
+
+
 class Identity(nnx.Module):
     def __call__(self, x):
         return x

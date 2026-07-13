@@ -103,6 +103,31 @@ def test_forward_full_sphere_and_south_cap(base_pixels, strategy):
     assert np.isfinite(np.asarray(y)).all()
 
 
+def test_grads_finite_on_all_zero_input():
+    # Zero-background inputs (e.g. sparse projections onto the sphere) produce
+    # exactly-zero q/k vectors in the first block (zero-init biases, post-norm).
+    # The cosine-attention normalization must have a finite gradient there:
+    # d/dx ||x|| is 0/0 = NaN at x = 0, and clamping the norm does not fix the
+    # backward pass.
+    model, p = tiny_hp()
+    model.train()
+    x = jnp.zeros((2, p.npix, 3))
+    grads = nnx.grad(lambda m: jnp.mean(m(x) ** 2))(model)
+    for path, g in nnx.to_flat_state(grads):
+        joined = "/".join(str(q) for q in path)
+        assert np.isfinite(np.asarray(g)).all(), f"non-finite grad at {joined}"
+
+
+def test_flat_grads_finite_on_all_zero_input():
+    model, p = tiny_flat()
+    model.train()
+    x = jnp.zeros((2, *p.img_size, 2))
+    grads = nnx.grad(lambda m: jnp.mean(m(x) ** 2))(model)
+    for path, g in nnx.to_flat_state(grads):
+        joined = "/".join(str(q) for q in path)
+        assert np.isfinite(np.asarray(g)).all(), f"non-finite grad at {joined}"
+
+
 def test_params_are_json_loggable_next_to_model():
     import dataclasses, json
     _, p = tiny_hp()
