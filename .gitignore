@@ -217,3 +217,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 uv.lock
+
+# Claude Code worktrees and superpowers scratch
+.claude/worktrees/
+.superpowers/
