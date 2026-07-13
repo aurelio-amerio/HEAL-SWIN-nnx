@@ -1,6 +1,9 @@
 # Handout: a convolutional variant of HEAL-SWIN (keep the window-shift, drop the attention)
 
-**Status:** idea capture only — not designed, not scheduled, not implemented.
+**Status:** designed and implemented — see
+`docs/superpowers/specs/2026-07-13-healconv-design.md` (spec) and
+`docs/superpowers/plans/2026-07-13-healconv.md` (plan). Module:
+`src/heal_swin_nnx/models/healconv.py`.
 **Date:** 2026-07-12
 **One line:** Reuse HEAL-SWIN's HEALPix window-partition + shift machinery to traverse the
 sphere, but replace the in-window self-attention with a 2D convolution. A lighter mixer for
