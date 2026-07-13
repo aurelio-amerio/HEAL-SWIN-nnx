@@ -6,15 +6,14 @@ from typing import Literal, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
-from einops import rearrange
 from flax import nnx
 
 from heal_swin_nnx.hp import shifting
 from heal_swin_nnx.hp.windowing import (
     nest_relative_position_index, nest_win_coords, window_partition, window_reverse)
 from heal_swin_nnx.layers import (
-    LN_EPS, TRUNC_NORMAL, DropPath, Identity, Mlp, apply_rope, init_rope_freqs,
-    rope_rotation_table)
+    LN_EPS, TRUNC_NORMAL, DropPath, FinalPatchExpand, Identity, Mlp, PatchEmbed,
+    PatchExpand, PatchMerging, apply_rope, init_rope_freqs, rope_rotation_table)
 from heal_swin_nnx.variables import Buffer
 
 POS_EMBEDS = ("none", "rel_bias", "rope_axial", "rope_mixed")
@@ -200,47 +199,6 @@ class WindowAttention(nnx.Module):
         return self.proj_drop(self.proj(x))
 
 
-class PatchMerging(nnx.Module):
-    def __init__(self, dim, dim_scale=2, *, rngs):
-        self.reduction = nnx.Linear(4 * dim, dim_scale * dim, use_bias=False,
-                                    kernel_init=TRUNC_NORMAL, rngs=rngs)
-        self.norm = nnx.LayerNorm(4 * dim, epsilon=LN_EPS, rngs=rngs)
-
-    def __call__(self, x):
-        B, N, C = x.shape
-        assert N % 4 == 0, "x size %d is not divisible by 4 as necessary for patching." % N
-        x = jnp.concatenate([x[:, 0::4], x[:, 1::4], x[:, 2::4], x[:, 3::4]], axis=-1)
-        return self.reduction(self.norm(x))
-
-
-class PatchExpand(nnx.Module):
-    def __init__(self, dim, dim_scale=2, *, rngs):
-        self.expand = (nnx.Linear(dim, dim_scale * dim, use_bias=False,
-                                  kernel_init=TRUNC_NORMAL, rngs=rngs)
-                       if dim_scale != 1 else Identity())
-        self.norm = nnx.LayerNorm(dim * dim_scale // 4, epsilon=LN_EPS, rngs=rngs)
-
-    def __call__(self, x):
-        x = self.expand(x)
-        C = x.shape[-1]
-        x = rearrange(x, "b n (p c) -> b (n p) c", p=4, c=C // 4)
-        return self.norm(x)
-
-
-class FinalPatchExpand(nnx.Module):
-    def __init__(self, patch_size, dim, *, rngs):
-        self.patch_size = patch_size
-        self.expand = nnx.Linear(dim, patch_size * dim, use_bias=False,
-                                 kernel_init=TRUNC_NORMAL, rngs=rngs)
-        self.norm = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
-
-    def __call__(self, x):
-        x = self.expand(x)
-        C = x.shape[-1]
-        x = rearrange(x, "b n (p c) -> b (n p) c", p=self.patch_size, c=C // self.patch_size)
-        return self.norm(x)
-
-
 class HealSwinBlock(nnx.Module):
     def __init__(self, params, dim, input_resolution, num_heads, shifted, drop_path, *, rngs):
         self.input_resolution = input_resolution
@@ -329,25 +287,6 @@ class DecoderStage(nnx.Module):
         return x
 
 
-class PatchEmbed(nnx.Module):
-    def __init__(self, params, *, rngs):
-        self.npix = params.npix
-        self.num_patches = params.npix // params.patch_size
-        self.proj = nnx.Conv(params.in_channels, params.embed_dim,
-                             kernel_size=(params.patch_size,), strides=(params.patch_size,),
-                             padding="VALID", rngs=rngs)
-        self.norm = (nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, rngs=rngs)
-                     if params.patch_embed_norm else None)
-
-    def __call__(self, x):  # (B, N, in_channels) channels-last
-        assert x.shape[1] == self.npix, (
-            "Input map size (%d) doesn't match model (%d)." % (x.shape[1], self.npix))
-        x = self.proj(x)
-        if self.norm is not None:
-            x = self.norm(x)
-        return x
-
-
 def _drop_path_schedule(params):
     return [float(v) for v in np.linspace(0, params.drop_path_rate, sum(params.depths))]
 
@@ -360,7 +299,8 @@ class HealSwinEncoder(nnx.Module):
         self.params = params
         self.num_layers = len(params.depths)
         self.num_features = int(params.embed_dim * 2 ** (self.num_layers - 1))
-        self.patch_embed = PatchEmbed(params, rngs=rngs)
+        self.patch_embed = PatchEmbed(params.npix, params.patch_size, params.in_channels,
+                                      params.embed_dim, params.patch_embed_norm, rngs=rngs)
         self.pos_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
 
         num_patches = self.patch_embed.num_patches
