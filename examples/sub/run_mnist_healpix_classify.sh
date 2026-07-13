@@ -13,5 +13,5 @@ cd "$1"
 # stray JAX_PLATFORMS=cpu from the submit environment can't force CPU-only
 # training.
 unset JAX_PLATFORMS
-
+cd /lhome/ific/a/aamerio/data/github/HEAL-SWIN-nnx
 exec uv run --extra examples python examples/mnist_healpix_classify.py
