@@ -29,3 +29,10 @@ dev = [
     "pytest-env>=1.6.0",
     "pytest-xdist>=3.8.0",
 ]
+
+[project.optional-dependencies]
+examples = [
+    "grain>=0.2.18",
+    "notebook>=7.6.0",
+    "datasets>=5.0.0",
+]

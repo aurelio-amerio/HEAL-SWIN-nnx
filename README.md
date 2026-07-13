@@ -74,13 +74,70 @@ Shift strategies:
 
 - `nest_roll` — 1D roll on the NEST sequence (cheapest, coarsest).
 - `nest_grid_shift` — the reference HEAL-SWIN hierarchical grid shift; face-seam
-  windows that glue geometrically wrong edges are attention-masked.
+  windows that glue geometrically wrong edges are attention-masked. Its index math
+  requires the deepest stage to hold a full window (bottleneck `nside² ≥ window_size`);
+  `HealSwinParams` rejects configs that bottleneck below that. The other three
+  strategies handle a unit bottleneck.
 - `nest_grid_shift_exact` — seam-exact variant: window content crosses face seams
   with the correct pixels and orientation wherever the two faces' local frames
   align (all polar-to-equatorial seams). Attention masking remains at the 8 pinch
   points, at the 90°-rotated south-south seams, and at coverage borders for
   partial-sky models.
 - `ring_shift` — shift along HEALPix iso-latitude rings; exact on the full sphere.
+
+## Strategy cost
+
+`scripts/bench_strategies.py` times each strategy two ways — the shift op in
+isolation and a full `HealSwin` forward+backward step — so you can pick a
+strategy on geometry, not guesswork:
+
+```bash
+uv run python scripts/bench_strategies.py           # full sphere, nside 16 and 64
+```
+
+Numbers below are from one CPU run (jax 0.10.2, full sphere, `window_size=4`,
+`batch=2`); treat them as ratios, not absolutes. **fwd+bwd** is the timed
+forward+backward; **build** is the one-time construction cost, paid once when the
+model is built and done host-side in NumPy/healpy.
+
+Shift op alone (a gather forward + its scatter backward), channels=96:
+
+| strategy                | fwd+bwd n16 | fwd+bwd n64 | build n16 | build n64 |
+| ----------------------- | ----------: | ----------: | --------: | --------: |
+| `nest_roll`             |      0.5 ms |     26.6 ms |     11 ms |     16 ms |
+| `nest_grid_shift`       |      1.3 ms |     45.4 ms |     30 ms |    270 ms |
+| `nest_grid_shift_exact` |      1.4 ms |     45.9 ms |    788 ms |   19.1 s  |
+| `ring_shift`            |      1.4 ms |     46.3 ms |      7 ms |    128 ms |
+
+Full model (`embed_dim=48`, `depths=(2,2,2)`, `num_heads=(2,4,8)`):
+
+| strategy                | fwd+bwd n16 | fwd+bwd n64 | build n16 | build n64 |
+| ----------------------- | ----------: | ----------: | --------: | --------: |
+| `nest_roll`             |      111 ms |      806 ms |    178 ms |    213 ms |
+| `nest_grid_shift`       |      112 ms |      841 ms |    198 ms |    415 ms |
+| `nest_grid_shift_exact` |      113 ms |      819 ms |    562 ms |    9.7 s  |
+| `ring_shift`            |      128 ms |      815 ms |    183 ms |    347 ms |
+
+Takeaways:
+
+- **Per-step compute barely depends on the strategy.** In the full model all four
+  land within ~4% at nside 64 and ~13% at nside 16 — the shift is a thin slice of
+  a Swin block, dwarfed by attention and MLPs. Choose the strategy for geometric
+  fidelity; it costs almost nothing at run time.
+- **The three index strategies are the same runtime op.** `nest_grid_shift`,
+  `nest_grid_shift_exact` and `ring_shift` are each a single `jnp.take` gather over
+  a precomputed index buffer, so in isolation they time within ~2% of one another.
+  `nest_roll` is a contiguous `jnp.roll` and runs ~1.7–2.5× cheaper on CPU (no
+  scatter/gather) — a gap that mostly washes out once attention dominates.
+- **The real divergence is one-time build cost.** `nest_roll` (just a mask) and
+  `ring_shift` (healpy round-trips) are cheap; `nest_grid_shift` is cheap; but
+  `nest_grid_shift_exact`'s seam geometry is expensive and scales steeply with
+  `nside` (~0.8 s at 16 → ~19 s at 64 per shifter). It is still paid only once at
+  construction — negligible against a real training run, but noticeable when
+  building many small models (tests, quick sweeps).
+
+On GPU the run-time gaps shrink further (gather/scatter and roll are all cheap
+on-device); build cost is host-side and unchanged.
 
 ## Tests
 

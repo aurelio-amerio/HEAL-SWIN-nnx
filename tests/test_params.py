@@ -80,6 +80,26 @@ def test_unknown_enum_values_rejected():
         HealSwinParams(nside=16, in_channels=1, out_channels=1, shift_strategy="roll")
 
 
+def test_nest_grid_shift_requires_window_sized_bottleneck():
+    # nside=16, patch_size=4, 4 stages -> per-face nside 8 -> 4 -> 2 -> 1 at the
+    # bottleneck. nest_grid_shift's index math needs the deepest stage to hold a
+    # full window (nside**2 >= window_size), so nside=1 must be rejected up front
+    # with a clear message instead of a ZeroDivisionError during model construction.
+    with pytest.raises(ValueError, match="nest_grid_shift"):
+        HealSwinParams(nside=16, in_channels=1, out_channels=1,
+                       depths=(2, 2, 6, 2), num_heads=(3, 6, 12, 24),
+                       shift_strategy="nest_grid_shift")
+    # The same unit-bottleneck geometry is fine for strategies that support it.
+    for strat in ("nest_roll", "nest_grid_shift_exact", "ring_shift"):
+        HealSwinParams(nside=16, in_channels=1, out_channels=1,
+                       depths=(2, 2, 6, 2), num_heads=(3, 6, 12, 24),
+                       shift_strategy=strat)
+    # And a bottleneck that does hold a window (nside=2 here) is accepted.
+    HealSwinParams(nside=16, in_channels=1, out_channels=1,
+                   depths=(2, 2, 2), num_heads=(3, 6, 12),
+                   shift_strategy="nest_grid_shift")
+
+
 def test_window_size_must_be_power_of_four():
     with pytest.raises(ValueError):
         HealSwinParams(nside=16, in_channels=1, out_channels=1, window_size=8)

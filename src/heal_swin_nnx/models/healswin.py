@@ -95,6 +95,26 @@ class HealSwinParams:
                 "nside^2/patch_size (%d) must be divisible by 4^(n_stages-1) (%d): "
                 "every encoder stage needs an integer per-face nside"
                 % (self.nside ** 2 // self.patch_size, 4 ** (n_stages - 1)))
+        # nest_grid_shift's hierarchical index math needs the deepest (bottleneck)
+        # stage to hold at least one full window per face — its per-face pixel count
+        # (nside_bottleneck^2) must be >= window_size, else base_pix_len rounds to 0
+        # and construction divides by zero. The other strategies handle a unit
+        # bottleneck, so this constraint is specific to nest_grid_shift.
+        if self.shift_strategy == "nest_grid_shift":
+            bottleneck_face_pix = (self.nside ** 2 // self.patch_size) // 4 ** (n_stages - 1)
+            if bottleneck_face_pix < self.window_size:
+                bottleneck_nside = int(round(bottleneck_face_pix ** 0.5))
+                raise ValueError(
+                    "shift_strategy='nest_grid_shift' needs the bottleneck (deepest) "
+                    "stage to hold a full window: bottleneck nside^2 (%d) must be >= "
+                    "window_size (%d), i.e. bottleneck nside >= %d. Got bottleneck "
+                    "nside=%d from nside=%d, patch_size=%d, %d stages. Use fewer stages, "
+                    "a larger nside, a smaller window_size, or a shift_strategy that "
+                    "supports a unit bottleneck ('nest_grid_shift_exact', 'ring_shift', "
+                    "'nest_roll')."
+                    % (bottleneck_face_pix, self.window_size,
+                       int(round(self.window_size ** 0.5)), bottleneck_nside,
+                       self.nside, self.patch_size, n_stages))
         for i, heads in enumerate(self.num_heads):
             dim = self.embed_dim * 2 ** i
             if dim % heads:
