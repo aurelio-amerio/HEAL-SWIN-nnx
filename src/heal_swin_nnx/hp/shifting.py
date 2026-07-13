@@ -17,6 +17,9 @@ from heal_swin_nnx.hp import topology as hp_topology
 from heal_swin_nnx.variables import Buffer
 
 
+SHIFT_STRATEGIES = ("nest_roll", "nest_grid_shift", "nest_grid_shift_exact", "ring_shift")
+
+
 def get_attn_mask_from_mask(mask, window_size):
     """(N,) int-valued region mask -> (nW, ws, ws) float32 attention mask in {0, -100}."""
     mask_windows = np.asarray(mask, dtype=np.float32).reshape(-1, window_size)
@@ -24,7 +27,23 @@ def get_attn_mask_from_mask(mask, window_size):
     return np.where(attn_mask != 0, np.float32(-100.0), np.float32(0.0))
 
 
-def nest_roll_mask(input_resolution, window_size, shift_size):
+def validity_from_mask(raw_mask, window_size):
+    """(N,) int-valued region mask -> (nW, ws) float32 in {0, 1}: 1 where the pixel
+    belongs to its window's majority region (ties: lowest label wins).
+
+    Construction-time helper for conv mixers, which cannot use the pairwise
+    additive attention mask; per-window Python loop is fine here."""
+    mask_windows = np.asarray(raw_mask).reshape(-1, window_size)
+    validity = np.zeros(mask_windows.shape, dtype=np.float32)
+    for i, w in enumerate(mask_windows):
+        labels, counts = np.unique(w, return_counts=True)  # labels sorted ascending
+        dominant = labels[np.argmax(counts)]               # first max -> lowest label on ties
+        validity[i] = (w == dominant)
+    return validity
+
+
+def nest_roll_raw_mask(input_resolution, window_size, shift_size):
+    """(input_resolution,) float32 region labels for a nest_roll shift."""
     img_mask = np.zeros(input_resolution, dtype=np.float32)
     slices = (
         slice(0, -window_size),
@@ -33,7 +52,12 @@ def nest_roll_mask(input_resolution, window_size, shift_size):
     )
     for cnt, s in enumerate(slices):
         img_mask[s] = cnt
-    return get_attn_mask_from_mask(img_mask, window_size)
+    return img_mask
+
+
+def nest_roll_mask(input_resolution, window_size, shift_size):
+    return get_attn_mask_from_mask(
+        nest_roll_raw_mask(input_resolution, window_size, shift_size), window_size)
 
 
 class NoShift(nnx.Module):

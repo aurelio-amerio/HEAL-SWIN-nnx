@@ -9,6 +9,7 @@ import numpy as np
 from flax import nnx
 
 from heal_swin_nnx.hp import shifting
+from heal_swin_nnx.hp.shifting import SHIFT_STRATEGIES
 from heal_swin_nnx.hp.windowing import (
     nest_relative_position_index, nest_win_coords, window_partition, window_reverse)
 from heal_swin_nnx.layers import (
@@ -17,7 +18,6 @@ from heal_swin_nnx.layers import (
 from heal_swin_nnx.variables import Buffer
 
 POS_EMBEDS = ("none", "rel_bias", "rope_axial", "rope_mixed")
-SHIFT_STRATEGIES = ("nest_roll", "nest_grid_shift", "nest_grid_shift_exact", "ring_shift")
 
 
 @dataclass
