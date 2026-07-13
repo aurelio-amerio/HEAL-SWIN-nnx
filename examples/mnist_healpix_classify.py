@@ -53,7 +53,7 @@ from mnist_healpix_dataset import make_mnist_healpix_dataset
 # absl.app.run) leaves them unparsed, so grain raises UnparsedFlagAccessError on
 # the first prefetch. Parse argv once here to mark the flags parsed.
 if not flags.FLAGS.is_parsed():
-    flags.FLAGS(sys.argv)
+    flags.FLAGS(sys.argv, known_only=True)
 
 # --- config (tune here) --------------------------------------------------
 NSIDE = 64
@@ -145,7 +145,7 @@ def evaluate(model, test_ds):
         correct += int((preds == labels).sum())
         total += int(labels.shape[0])
     model.train()
-    return correct / total
+    return correct / max(total, 1)
 
 
 def main():

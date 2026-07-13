@@ -29,8 +29,10 @@ class _Projector:
     """Picklable per-record projection: spec index -> {image, label}.
 
     Holds the shared MNIST arrays and the pre-drawn spec arrays. grain pickles
-    this into each ``mp_prefetch`` worker (copying ``images`` ~37 MB/worker).
-    Uses only numpy + healpy, so workers touch no accelerator.
+    this into each ``mp_prefetch`` worker; ``images`` is kept as ``uint8`` so
+    that copy stays small (~47 MB/worker for the 60k train split) and is cast
+    to float per record inside :meth:`__call__`. Uses only numpy + healpy, so
+    workers touch no accelerator.
     """
 
     def __init__(self, images, labels, idx, angles, delta_theta, delta_phi, nside):
@@ -46,7 +48,7 @@ class _Projector:
         j = int(self.idx[i])
         rot = hp.rotator.Rotator(rot=tuple(self.angles[i]))
         hp_map, _hits = img2healpix(
-            self.images[j],
+            self.images[j].astype(np.float64),
             nside=self.nside,
             delta_theta=float(self.delta_theta[i]),
             delta_phi=float(self.delta_phi[i]),
@@ -86,7 +88,7 @@ def make_mnist_healpix_dataset(
     rng = np.random.default_rng(seed)
 
     mnist = load_dataset("ylecun/mnist")[split]
-    images = np.asarray(mnist["image"], dtype=np.float64)  # (M, 28, 28)
+    images = np.asarray(mnist["image"], dtype=np.uint8)  # (M, 28, 28); cast per record
     labels = np.asarray(mnist["label"], dtype=np.int64)    # (M,)
     n_mnist = images.shape[0]
 
