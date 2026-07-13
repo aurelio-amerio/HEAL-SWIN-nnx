@@ -14,8 +14,21 @@ Run headless (GPU recommended):
 
 from __future__ import annotations
 
-import math
 import os
+import sys
+
+# grain's mp_prefetch spawns worker processes that re-import this module
+# (multiprocessing "spawn"). Force those workers onto CPU so they never try to
+# grab the GPU the main process is training on — the workers only do numpy +
+# healpy projection and touch no accelerator. The main process defaults to the
+# GPU; an explicit JAX_PLATFORMS from the caller (e.g. the SMOKE check below)
+# still wins via setdefault.
+if __name__ != "__main__":
+    os.environ["JAX_PLATFORMS"] = "cpu"
+else:
+    os.environ.setdefault("JAX_PLATFORMS", "cuda")
+
+import math
 import time
 
 import jax
@@ -24,10 +37,19 @@ import numpy as np
 import optax
 from flax import nnx
 
+from absl import flags
+
 import grain
 
 from heal_swin_nnx import HealSwinEncoder, HealSwinParams
 from mnist_healpix_dataset import make_mnist_healpix_dataset
+
+# grain's mp_prefetch reads absl flags (e.g. --grain_enable_multiprocess_worker_
+# profiling). Running this script as a plain `python ...` (not through
+# absl.app.run) leaves them unparsed, so grain raises UnparsedFlagAccessError on
+# the first prefetch. Parse argv once here to mark the flags parsed.
+if not flags.FLAGS.is_parsed():
+    flags.FLAGS(sys.argv)
 
 # --- config (tune here) --------------------------------------------------
 NSIDE = 64
