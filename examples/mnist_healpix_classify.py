@@ -7,9 +7,13 @@ compresses each map to bottleneck tokens; mean-pooling + a linear head predict
 the digit class. Trains on 100k projected samples, validates on 10k fixed test
 samples.
 
-Run headless (GPU recommended):
+Run headless. The script defaults to the GPU (``JAX_PLATFORMS=cuda``) and will
+fail fast on a machine with no CUDA device — set ``JAX_PLATFORMS=cpu`` to force
+CPU. Spawned grain data-loader workers are always pinned to CPU (see below).
 
     uv run --extra examples python examples/mnist_healpix_classify.py
+
+Or submit it to a GPU node via HTCondor: ``examples/sub/mnist_healpix_classify.sub``.
 """
 
 from __future__ import annotations
