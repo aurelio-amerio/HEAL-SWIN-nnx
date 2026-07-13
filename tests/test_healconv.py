@@ -101,3 +101,77 @@ def test_block_output_shape_and_finite():
     y = np.asarray(blk(x))
     assert y.shape == (2, N, 8)
     assert np.isfinite(y).all()
+
+
+# --- model level -------------------------------------------------------------
+from heal_swin_nnx import HealConv, HealConvEncoder
+
+
+def tiny_conv(**over):
+    p = tiny_conv_params(**over)
+    return HealConv(p, rngs=nnx.Rngs(0)), p
+
+
+@pytest.mark.parametrize("strategy", STRATEGIES)
+@pytest.mark.parametrize("base_pixels", [tuple(range(12)), (8, 9, 10, 11)])
+def test_conv_forward_full_sphere_and_south_cap(base_pixels, strategy):
+    model, p = tiny_conv(base_pixels=base_pixels, shift_strategy=strategy)
+    model.eval()
+    x = jax.random.normal(jax.random.key(0), (2, p.npix, 3))
+    y = model(x)
+    assert y.shape == (2, p.npix, 5)
+    assert np.isfinite(np.asarray(y)).all()
+
+
+def test_conv_jit_matches_eager():
+    model, p = tiny_conv()
+    model.eval()
+    x = jax.random.normal(jax.random.key(0), (2, p.npix, 3))
+    # tolerance covers float32 jit-fusion reduction-order drift; real bugs >> 1e-4
+    np.testing.assert_allclose(np.asarray(nnx.jit(lambda m, x: m(x))(model, x)),
+                               np.asarray(model(x)), rtol=1e-4, atol=1e-4)
+
+
+def test_conv_batch_independence():
+    model, p = tiny_conv()
+    model.eval()
+    x = jax.random.normal(jax.random.key(0), (3, p.npix, 3))
+    full = np.asarray(model(x))
+    single = np.asarray(model(x[1:2]))
+    np.testing.assert_allclose(full[1:2], single, rtol=1e-4, atol=1e-4)
+
+
+def test_conv_remat_matches_no_remat():
+    m1, p = tiny_conv()
+    m2, _ = tiny_conv(use_checkpoint=True)
+    m1.eval(); m2.eval()
+    x = jax.random.normal(jax.random.key(0), (1, p.npix, 3))
+    np.testing.assert_allclose(np.asarray(m2(x)), np.asarray(m1(x)), rtol=1e-6, atol=1e-6)
+
+
+def test_conv_encoder_standalone_no_decoder_params():
+    p = tiny_conv_params()
+    enc = HealConvEncoder(p, rngs=nnx.Rngs(0))
+    tokens, skips = enc(jnp.ones((1, p.npix, 3)))
+    assert tokens.shape == (1, p.npix // 4 // 4, 32)   # N/(patch*4^(L-1)), embed*2^(L-1)
+    assert len(skips) == 2
+    paths = [tuple(str(q) for q in path)
+             for path, _ in nnx.to_flat_state(nnx.state(enc, nnx.Param))]
+    assert not any("decoder" in q for path in paths for q in path)
+
+
+def test_conv_no_buffer_is_a_param():
+    model, _ = tiny_conv()
+    params = dict(nnx.to_flat_state(nnx.state(model, nnx.Param)))
+    for path in params:
+        joined = "/".join(str(q) for q in path)
+        for banned in ("attn_mask", "shift_idcs", "grid_perm", "inv_perm", "validity"):
+            assert banned not in joined
+    # and the depthwise kernels DO train
+    assert any("dwconv" in "/".join(str(q) for q in path) for path in params)
+
+
+def test_conv_params_are_json_loggable_next_to_model():
+    import dataclasses, json
+    _, p = tiny_conv()
+    json.dumps(dataclasses.asdict(p))

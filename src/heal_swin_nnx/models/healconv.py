@@ -212,3 +212,135 @@ class HealConvBlock(nnx.Module):
     def __call__(self, x):
         x = x + self.drop_path(self.norm1(self._mix(x)))
         return x + self.drop_path(self.norm2(self.mlp(x)))
+
+
+def _drop_path_schedule(params):
+    return [float(v) for v in np.linspace(0, params.drop_path_rate, sum(params.depths))]
+
+
+def _make_blocks(params, dim, input_resolution, depth, drop_path, rngs):
+    return [HealConvBlock(params, dim, input_resolution,
+                          shifted=(i % 2 == 1), drop_path=drop_path[i], rngs=rngs)
+            for i in range(depth)]
+
+
+class ConvEncoderStage(nnx.Module):
+    def __init__(self, params, dim, input_resolution, depth, drop_path, downsample, *, rngs):
+        self.use_checkpoint = params.use_checkpoint
+        self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
+                                            drop_path, rngs))
+        self.downsample = PatchMerging(dim=dim, rngs=rngs) if downsample else None
+
+    def __call__(self, x):
+        for blk in self.blocks:
+            x = nnx.remat(type(blk).__call__)(blk, x) if self.use_checkpoint else blk(x)
+        if self.downsample is not None:
+            x = self.downsample(x)
+        return x
+
+
+class ConvDecoderStage(nnx.Module):
+    def __init__(self, params, dim, input_resolution, depth, drop_path, upsample, *, rngs):
+        self.use_checkpoint = params.use_checkpoint
+        self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
+                                            drop_path, rngs))
+        self.upsample = PatchExpand(dim=dim, dim_scale=2, rngs=rngs) if upsample else None
+
+    def __call__(self, x):
+        for blk in self.blocks:
+            x = nnx.remat(type(blk).__call__)(blk, x) if self.use_checkpoint else blk(x)
+        if self.upsample is not None:
+            x = self.upsample(x)
+        return x
+
+
+class HealConvEncoder(nnx.Module):
+    """Compression-only backbone: patch embed + conv encoder stages + final norm.
+    Standalone-usable (tokenizer / embedder); allocates no decoder parameters."""
+
+    def __init__(self, params, *, rngs):
+        self.params = params
+        self.num_layers = len(params.depths)
+        self.num_features = int(params.embed_dim * 2 ** (self.num_layers - 1))
+        self.patch_embed = PatchEmbed(params.npix, params.patch_size, params.in_channels,
+                                      params.embed_dim, params.patch_embed_norm, rngs=rngs)
+        self.pos_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
+
+        num_patches = self.patch_embed.num_patches
+        dpr = _drop_path_schedule(params)
+        layers = []
+        for i in range(self.num_layers):
+            layers.append(ConvEncoderStage(
+                params, dim=int(params.embed_dim * 2 ** i),
+                input_resolution=num_patches // 4 ** i,
+                depth=params.depths[i],
+                drop_path=dpr[sum(params.depths[:i]):sum(params.depths[:i + 1])],
+                downsample=i < self.num_layers - 1, rngs=rngs))
+        self.layers = nnx.List(layers)
+        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x):
+        x = self.patch_embed(x)
+        x = self.pos_drop(x)
+        skips = []
+        for layer in self.layers:
+            skips.append(x)
+            x = layer(x)
+        return self.norm(x), skips
+
+
+class HealConvDecoder(nnx.Module):
+    """UNet decoder head producing dense per-pixel outputs."""
+
+    def __init__(self, params, *, rngs):
+        self.num_layers = len(params.depths)
+        num_patches = params.npix // params.patch_size
+        dpr = _drop_path_schedule(params)
+        layers_up = []
+        concat_back_dim = []
+        for i_layer in range(self.num_layers):
+            down_idx = self.num_layers - 1 - i_layer
+            dim = int(params.embed_dim * 2 ** down_idx)
+            concat_back_dim.append(
+                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL, rngs=rngs)
+                if i_layer > 0 else Identity())
+            if i_layer == 0:
+                layers_up.append(PatchExpand(dim=dim, dim_scale=2, rngs=rngs))
+            else:
+                layers_up.append(ConvDecoderStage(
+                    params, dim=dim, input_resolution=num_patches // 4 ** down_idx,
+                    depth=params.depths[down_idx],
+                    drop_path=dpr[sum(params.depths[:down_idx]):
+                                  sum(params.depths[:down_idx + 1])],
+                    upsample=down_idx > 0, rngs=rngs))
+        self.layers_up = nnx.List(layers_up)
+        self.concat_back_dim = nnx.List(concat_back_dim)
+        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, rngs=rngs)
+        self.up = FinalPatchExpand(patch_size=params.patch_size, dim=params.embed_dim,
+                                   rngs=rngs)
+        self.output = nnx.Conv(params.embed_dim, params.out_channels, kernel_size=(1,),
+                               use_bias=False, rngs=rngs)
+
+    def __call__(self, x, skips):
+        for inx, layer_up in enumerate(self.layers_up):
+            if inx == 0:
+                x = layer_up(x)
+            else:
+                x = jnp.concatenate([x, skips[self.num_layers - 1 - inx]], axis=-1)
+                x = self.concat_back_dim[inx](x)
+                x = layer_up(x)
+        x = self.norm_up(x)
+        x = self.up(x)
+        return self.output(x)  # (B, npix, out_channels) channels-last
+
+
+class HealConv(nnx.Module):
+    """HEALPix depthwise-conv U-Net: HealConvEncoder + HealConvDecoder."""
+
+    def __init__(self, params, *, rngs):
+        self.encoder = HealConvEncoder(params, rngs=rngs)
+        self.decoder = HealConvDecoder(params, rngs=rngs)
+
+    def __call__(self, x):
+        tokens, skips = self.encoder(x)
+        return self.decoder(tokens, skips)
