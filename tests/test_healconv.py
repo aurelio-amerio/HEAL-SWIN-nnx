@@ -23,8 +23,9 @@ def make_block(shifted, **over):
     return blk, p, N
 
 
-def test_grid_perm_round_trip():
-    blk, _, _ = make_block(shifted=False)
+@pytest.mark.parametrize("kernel_size", [2, 4, 8])
+def test_grid_perm_round_trip(kernel_size):
+    blk, _, _ = make_block(shifted=False, kernel_size=kernel_size)
     perm = np.asarray(blk.grid_perm[...])
     inv = np.asarray(blk.inv_perm[...])
     ws = blk.window_size
@@ -42,15 +43,16 @@ def _set_delta_kernel(blk, dim):
     kern = np.zeros((k, k, 1, dim), dtype=np.float32)
     tap = (k - 1) // 2
     kern[tap, tap, 0, :] = 1.0
-    blk.dwconv.kernel.value = jnp.asarray(kern)
+    blk.dwconv.kernel[...] = jnp.asarray(kern)
     if blk.dwconv.bias is not None:
-        blk.dwconv.bias.value = jnp.zeros_like(blk.dwconv.bias.value)
+        blk.dwconv.bias[...] = jnp.zeros_like(blk.dwconv.bias[...])
 
 
-def test_identity_kernel_mix_is_identity_unshifted():
+@pytest.mark.parametrize("kernel_size", [2, 4, 8])
+def test_identity_kernel_mix_is_identity_unshifted(kernel_size):
     # With a delta kernel, shift->window->grid->conv->ungrid->unwindow->unshift
     # must be an EXACT identity: catches any permutation/reshape/padding bug.
-    blk, p, N = make_block(shifted=False)
+    blk, p, N = make_block(shifted=False, kernel_size=kernel_size)
     _set_delta_kernel(blk, dim=8)
     x = jax.random.normal(jax.random.key(0), (2, N, 8))
     np.testing.assert_array_equal(np.asarray(blk._mix(x)), np.asarray(x))
@@ -58,11 +60,21 @@ def test_identity_kernel_mix_is_identity_unshifted():
 
 STRATEGIES = ["nest_roll", "nest_grid_shift", "nest_grid_shift_exact", "ring_shift"]
 
+# (strategy, base_pixels): ring_shift's mask is all-zeros on the full sphere
+# (no seam crosses a base-pixel boundary there), so it needs a partial-sky
+# geometry to exercise a nontrivial cross-region mask; the other strategies
+# already produce nontrivial masks on the full sphere.
+CROSS_REGION_CASES = [
+    ("nest_roll", tuple(range(12))),
+    ("nest_grid_shift", tuple(range(12))),
+    ("nest_grid_shift_exact", tuple(range(12))),
+    ("ring_shift", (8, 9, 10, 11)),
+]
 
-@pytest.mark.parametrize("strategy", STRATEGIES)
-def test_cross_region_independence_shifted(strategy):
-    # full sphere so every strategy produces a nontrivial region mask
-    blk, p, N = make_block(shifted=True, base_pixels=tuple(range(12)),
+
+@pytest.mark.parametrize("strategy,base_pixels", CROSS_REGION_CASES)
+def test_cross_region_independence_shifted(strategy, base_pixels):
+    blk, p, N = make_block(shifted=True, base_pixels=base_pixels,
                            shift_strategy=strategy)
     assert blk.validity is not None
     v = np.asarray(blk.validity[...])[:, :, 0].reshape(-1)   # (N,) in shifted coords
