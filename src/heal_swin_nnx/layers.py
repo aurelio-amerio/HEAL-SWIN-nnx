@@ -1,6 +1,7 @@
 """Shared leaf modules and RoPE primitives used by both models."""
 import jax
 import jax.numpy as jnp
+from einops import rearrange
 from flax import nnx
 
 # Distributional mirror of timm's trunc_normal_(std=0.02). (jax truncates at
@@ -87,3 +88,70 @@ def apply_rope(q, k, table):
         out = table[..., 0] * xr[..., 0] + table[..., 1] * xr[..., 1]
         return out.reshape(*x.shape).astype(x.dtype)
     return rot(q), rot(k)
+
+
+class PatchMerging(nnx.Module):
+    """Merge 4 nested pixels into 1: (B, N, C) -> (B, N/4, dim_scale*C)."""
+
+    def __init__(self, dim, dim_scale=2, *, rngs):
+        self.reduction = nnx.Linear(4 * dim, dim_scale * dim, use_bias=False,
+                                    kernel_init=TRUNC_NORMAL, rngs=rngs)
+        self.norm = nnx.LayerNorm(4 * dim, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x):
+        B, N, C = x.shape
+        assert N % 4 == 0, "x size %d is not divisible by 4 as necessary for patching." % N
+        x = jnp.concatenate([x[:, 0::4], x[:, 1::4], x[:, 2::4], x[:, 3::4]], axis=-1)
+        return self.reduction(self.norm(x))
+
+
+class PatchExpand(nnx.Module):
+    """Expand 1 pixel into 4 nested pixels: (B, N, C) -> (B, 4N, C*dim_scale/4)."""
+
+    def __init__(self, dim, dim_scale=2, *, rngs):
+        self.expand = (nnx.Linear(dim, dim_scale * dim, use_bias=False,
+                                  kernel_init=TRUNC_NORMAL, rngs=rngs)
+                       if dim_scale != 1 else Identity())
+        self.norm = nnx.LayerNorm(dim * dim_scale // 4, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x):
+        x = self.expand(x)
+        C = x.shape[-1]
+        x = rearrange(x, "b n (p c) -> b (n p) c", p=4, c=C // 4)
+        return self.norm(x)
+
+
+class FinalPatchExpand(nnx.Module):
+    """Undo the patch embedding's downsampling: (B, N, C) -> (B, N*patch_size, C)."""
+
+    def __init__(self, patch_size, dim, *, rngs):
+        self.patch_size = patch_size
+        self.expand = nnx.Linear(dim, patch_size * dim, use_bias=False,
+                                 kernel_init=TRUNC_NORMAL, rngs=rngs)
+        self.norm = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
+
+    def __call__(self, x):
+        x = self.expand(x)
+        C = x.shape[-1]
+        x = rearrange(x, "b n (p c) -> b (n p) c", p=self.patch_size, c=C // self.patch_size)
+        return self.norm(x)
+
+
+class PatchEmbed(nnx.Module):
+    """Non-overlapping 1D patch embedding over the nested pixel sequence."""
+
+    def __init__(self, npix, patch_size, in_channels, embed_dim, norm=False, *, rngs):
+        self.npix = npix
+        self.num_patches = npix // patch_size
+        self.proj = nnx.Conv(in_channels, embed_dim,
+                             kernel_size=(patch_size,), strides=(patch_size,),
+                             padding="VALID", rngs=rngs)
+        self.norm = nnx.LayerNorm(embed_dim, epsilon=LN_EPS, rngs=rngs) if norm else None
+
+    def __call__(self, x):  # (B, N, in_channels) channels-last
+        assert x.shape[1] == self.npix, (
+            "Input map size (%d) doesn't match model (%d)." % (x.shape[1], self.npix))
+        x = self.proj(x)
+        if self.norm is not None:
+            x = self.norm(x)
+        return x

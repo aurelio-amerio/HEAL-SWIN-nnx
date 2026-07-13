@@ -1,28 +1,31 @@
-"""HealSwin: HEALPix-native Swin V2 U-Net (diverged from the HEAL-SWIN reference)."""
+"""HealConv: HEALPix U-Net with depthwise-conv window mixing (no attention).
+
+Reuses HEAL-SWIN's traversal machinery (window partition + shift strategies);
+the in-window mixer is a depthwise k x k convolution over the window's
+Cartesian grid, followed by the shared per-pixel Mlp (ConvNeXt/MetaFormer
+factorization). Spec: docs/superpowers/specs/2026-07-13-healconv-design.md.
+"""
 import math
 from dataclasses import dataclass
 from typing import Literal, Optional, Sequence, Tuple, Union
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
 from heal_swin_nnx.hp import shifting
+from heal_swin_nnx.hp import topology as hp_topology
 from heal_swin_nnx.hp.shifting import SHIFT_STRATEGIES
-from heal_swin_nnx.hp.windowing import (
-    nest_relative_position_index, nest_win_coords, window_partition, window_reverse)
+from heal_swin_nnx.hp.windowing import get_nest_win_idcs, window_partition, window_reverse
 from heal_swin_nnx.layers import (
     LN_EPS, TRUNC_NORMAL, DropPath, FinalPatchExpand, Identity, Mlp, PatchEmbed,
-    PatchExpand, PatchMerging, apply_rope, init_rope_freqs, rope_rotation_table)
+    PatchExpand, PatchMerging)
 from heal_swin_nnx.variables import Buffer
-
-POS_EMBEDS = ("none", "rel_bias", "rope_axial", "rope_mixed")
 
 
 @dataclass
-class HealSwinParams:
-    """Pure-data description of a HealSwin model (architecture + geometry).
+class HealConvParams:
+    """Pure-data description of a HealConv model (architecture + geometry).
 
     Serializable: ``json.dumps(dataclasses.asdict(params))`` works, so a run's
     exact configuration can be logged and compared."""
@@ -35,21 +38,17 @@ class HealSwinParams:
 
     # architecture
     patch_size: int = 4
-    window_size: int = 4
+    kernel_size: int = 4             # k x k depthwise kernel; window = k^2 pixels
     embed_dim: int = 96
     depths: Tuple[int, ...] = (2, 2, 2, 2)
-    num_heads: Tuple[int, ...] = (3, 6, 12, 24)
     mlp_ratio: float = 4.0
-    qkv_bias: bool = True
-    pos_embed: Literal["none", "rel_bias", "rope_axial", "rope_mixed"] = "rope_mixed"
-    rope_theta: float = 10.0
+    conv_bias: bool = True
     patch_embed_norm: bool = False
     shift_strategy: Literal["nest_roll", "nest_grid_shift", "nest_grid_shift_exact",
                             "ring_shift"] = "nest_grid_shift_exact"
 
     # regularization / training
     drop_rate: float = 0.0
-    attn_drop_rate: float = 0.0
     drop_path_rate: float = 0.1
     use_checkpoint: bool = False
 
@@ -58,7 +57,6 @@ class HealSwinParams:
             self.base_pixels = tuple(range(12))
         self.base_pixels = tuple(self.base_pixels)
         self.depths = tuple(self.depths)
-        self.num_heads = tuple(self.num_heads)
 
         if any(not 0 <= b <= 11 for b in self.base_pixels):
             raise ValueError("base_pixels must be in [0, 11], got %r" % (self.base_pixels,))
@@ -66,23 +64,17 @@ class HealSwinParams:
             raise ValueError(
                 "base_pixels must be strictly increasing (canonical NEST subset order), "
                 "got %r" % (self.base_pixels,))
-        if self.pos_embed not in POS_EMBEDS:
-            raise ValueError("pos_embed must be one of %r, got %r"
-                             % (POS_EMBEDS, self.pos_embed))
         if self.shift_strategy not in SHIFT_STRATEGIES:
             raise ValueError("shift_strategy must be one of %r, got %r"
                              % (SHIFT_STRATEGIES, self.shift_strategy))
-        if len(self.depths) != len(self.num_heads):
-            raise ValueError("depths (%d) and num_heads (%d) must have equal length"
-                             % (len(self.depths), len(self.num_heads)))
+        if self.kernel_size < 2 or self.kernel_size & (self.kernel_size - 1):
+            raise ValueError(
+                "kernel_size must be a power of two >= 2: the k x k kernel spans a "
+                "nested quadtree window of k^2 pixels, so k must be in {2, 4, 8, ...} "
+                "(a 3x3 kernel is not expressible). Got %d" % self.kernel_size)
         if self.patch_size <= 0 or self.patch_size % 4 != 0:
             raise ValueError("patch_size must be a positive multiple of 4 "
                              "(valid nside in deeper layers), got %d" % self.patch_size)
-        s = int(round(self.window_size ** 0.5))
-        if self.window_size <= 0 or s * s != self.window_size or s & (s - 1):
-            raise ValueError(
-                "window_size must be a power of four (square nested window), "
-                "got %d" % self.window_size)
         if self.nside <= 0 or self.nside & (self.nside - 1):
             raise ValueError("nside must be a power of two, got %d" % self.nside)
         if self.nside ** 2 % self.patch_size:
@@ -94,120 +86,69 @@ class HealSwinParams:
                 "nside^2/patch_size (%d) must be divisible by 4^(n_stages-1) (%d): "
                 "every encoder stage needs an integer per-face nside"
                 % (self.nside ** 2 // self.patch_size, 4 ** (n_stages - 1)))
+        # The k x k kernel spans a whole window, so every stage must tile into
+        # whole windows (a clamped window would not be a power of four).
+        bottleneck = self.npix // self.patch_size // 4 ** (n_stages - 1)
+        if bottleneck % self.window_size:
+            raise ValueError(
+                "bottleneck resolution (%d pixels = npix/patch_size/4^(n_stages-1)) "
+                "must be divisible by window_size = kernel_size^2 (%d): every stage "
+                "needs whole windows for the k x k kernel. Use a smaller kernel_size, "
+                "fewer stages, or a larger nside." % (bottleneck, self.window_size))
         # nest_grid_shift's hierarchical index math needs the deepest (bottleneck)
-        # stage to hold at least one full window per face — its per-face pixel count
-        # (nside_bottleneck^2) must be >= window_size, else base_pix_len rounds to 0
-        # and construction divides by zero. The other strategies handle a unit
-        # bottleneck, so this constraint is specific to nest_grid_shift.
+        # stage to hold at least one full window per face (same rule as HealSwin).
         if self.shift_strategy == "nest_grid_shift":
             bottleneck_face_pix = (self.nside ** 2 // self.patch_size) // 4 ** (n_stages - 1)
             if bottleneck_face_pix < self.window_size:
-                bottleneck_nside = int(round(bottleneck_face_pix ** 0.5))
                 raise ValueError(
                     "shift_strategy='nest_grid_shift' needs the bottleneck (deepest) "
                     "stage to hold a full window: bottleneck nside^2 (%d) must be >= "
-                    "window_size (%d), i.e. bottleneck nside >= %d. Got bottleneck "
-                    "nside=%d from nside=%d, patch_size=%d, %d stages. Use fewer stages, "
-                    "a larger nside, a smaller window_size, or a shift_strategy that "
-                    "supports a unit bottleneck ('nest_grid_shift_exact', 'ring_shift', "
-                    "'nest_roll')."
-                    % (bottleneck_face_pix, self.window_size,
-                       int(round(self.window_size ** 0.5)), bottleneck_nside,
-                       self.nside, self.patch_size, n_stages))
-        for i, heads in enumerate(self.num_heads):
-            dim = self.embed_dim * 2 ** i
-            if dim % heads:
-                raise ValueError("stage %d: dim %d not divisible by num_heads %d"
-                                 % (i, dim, heads))
-            if self.pos_embed in ("rope_axial", "rope_mixed") and (dim // heads) % 4:
-                raise ValueError(
-                    "stage %d: head_dim %d must be divisible by 4 for RoPE "
-                    "(2D frequency split)" % (i, dim // heads))
+                    "window_size = kernel_size^2 (%d). Use fewer stages, a larger "
+                    "nside, a smaller kernel_size, or a shift_strategy that supports "
+                    "a unit bottleneck ('nest_grid_shift_exact', 'ring_shift', "
+                    "'nest_roll')." % (bottleneck_face_pix, self.window_size))
 
     @property
-    def npix(self):
-        return len(self.base_pixels) * self.nside ** 2
+    def window_size(self):
+        return self.kernel_size ** 2
 
     @property
     def shift_size(self):
         return self.window_size // 2
 
-
-class WindowAttention(nnx.Module):
-    """Swin V2 window attention: cosine similarity with learned logit scale,
-    positional encoding selected by ``params.pos_embed``."""
-
-    def __init__(self, params, dim, num_heads, window_size, *, rngs):
-        self.num_heads = num_heads
-        self.pos_embed = params.pos_embed
-        head_dim = dim // num_heads
-        self.logit_scale = nnx.Param(jnp.log(10.0 * jnp.ones((num_heads, 1, 1))))
-
-        if self.pos_embed == "rel_bias":
-            s = int(round(window_size ** 0.5))
-            assert s * s == window_size, "rel_bias needs a square (power-of-4) window"
-            self.relative_position_bias_table = nnx.Param(
-                TRUNC_NORMAL(rngs.params(), ((2 * s - 1) ** 2, num_heads)))
-            self.relative_position_index = Buffer(
-                jnp.asarray(nest_relative_position_index(window_size)))
-        elif self.pos_embed in ("rope_axial", "rope_mixed"):
-            coords = jnp.asarray(nest_win_coords(window_size))  # (2, window_size)
-            if self.pos_embed == "rope_mixed":
-                self.rope_freqs = nnx.Param(init_rope_freqs(
-                    head_dim, num_heads, params.rope_theta, key=rngs.params()))
-                self.rope_coords = Buffer(coords)
-            else:
-                freqs = init_rope_freqs(head_dim, num_heads, params.rope_theta)
-                self.rope_table = Buffer(rope_rotation_table(freqs, coords[0], coords[1]))
-
-        self.qkv = nnx.Linear(dim, dim * 3, use_bias=params.qkv_bias,
-                              kernel_init=TRUNC_NORMAL, rngs=rngs)
-        self.attn_drop = nnx.Dropout(params.attn_drop_rate, rngs=rngs)
-        self.proj = nnx.Linear(dim, dim, kernel_init=TRUNC_NORMAL, rngs=rngs)
-        self.proj_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
-
-    def __call__(self, x, mask=None):
-        B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads)
-        qkv = qkv.transpose(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-
-        q = q / jnp.maximum(jnp.linalg.norm(q, axis=-1, keepdims=True), 1e-12)
-        k = k / jnp.maximum(jnp.linalg.norm(k, axis=-1, keepdims=True), 1e-12)
-        if self.pos_embed == "rope_mixed":
-            coords = self.rope_coords[...]
-            table = rope_rotation_table(self.rope_freqs[...], coords[0], coords[1])
-            q, k = apply_rope(q, k, table)
-        elif self.pos_embed == "rope_axial":
-            q, k = apply_rope(q, k, self.rope_table[...])
-        attn = q @ k.swapaxes(-2, -1)
-        logit_scale = jnp.exp(jnp.minimum(self.logit_scale[...], jnp.log(1.0 / 0.01)))
-        attn = attn * logit_scale
-
-        if self.pos_embed == "rel_bias":
-            bias = self.relative_position_bias_table[...][self.relative_position_index[...]]
-            attn = attn + bias.transpose(2, 0, 1)[None]
-
-        if mask is not None:
-            nW = mask.shape[0]
-            attn = attn.reshape(B_ // nW, nW, self.num_heads, N, N) + mask[None, :, None]
-            attn = attn.reshape(-1, self.num_heads, N, N)
-        attn = jax.nn.softmax(attn, axis=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).swapaxes(1, 2).reshape(B_, N, C)
-        return self.proj_drop(self.proj(x))
+    @property
+    def npix(self):
+        return len(self.base_pixels) * self.nside ** 2
 
 
-class HealSwinBlock(nnx.Module):
-    def __init__(self, params, dim, input_resolution, num_heads, shifted, drop_path, *, rngs):
+class HealConvBlock(nnx.Module):
+    """shift -> window -> depthwise k x k conv (Cartesian grid) -> unwindow ->
+    unshift, then the shared per-pixel Mlp. Post-norm residual wiring identical
+    to HealSwinBlock; the conv replaces window attention.
+
+    In shifted blocks, wrapped-in foreign pixels are zeroed before the conv
+    (contribute nothing) and their update is zeroed after (residual
+    pass-through), per the majority-region validity mask."""
+
+    def __init__(self, params, dim, input_resolution, shifted, drop_path, *, rngs):
         self.input_resolution = input_resolution
         self.window_size = min(params.window_size, input_resolution)
+        self.num_windows = input_resolution // self.window_size
+        self.grid_size = math.isqrt(self.window_size)
+        assert self.grid_size ** 2 == self.window_size, \
+            "window clamped to a non-square size %d" % self.window_size
         shift_size = params.shift_size if (shifted
                                            and input_resolution > params.window_size) else 0
 
+        grid = get_nest_win_idcs(self.window_size).reshape(-1)
+        self.grid_perm = Buffer(jnp.asarray(grid))
+        self.inv_perm = Buffer(jnp.asarray(np.argsort(grid)))
+
+        self.dwconv = nnx.Conv(dim, dim, kernel_size=(self.grid_size, self.grid_size),
+                               feature_group_count=dim, padding="SAME",
+                               use_bias=params.conv_bias, kernel_init=TRUNC_NORMAL,
+                               rngs=rngs)
         self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
-        self.attn = WindowAttention(params, dim, num_heads, self.window_size, rngs=rngs)
         self.drop_path = DropPath(drop_path, rngs=rngs) if drop_path > 0.0 else Identity()
         self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
         self.mlp = Mlp(dim, int(dim * params.mlp_ratio), drop=params.drop_rate, rngs=rngs)
@@ -221,46 +162,73 @@ class HealSwinBlock(nnx.Module):
                 self.shifter = shifting.NestRollShift(
                     shift_size=shift_size, input_resolution=input_resolution,
                     window_size=self.window_size)
+                raw_mask = shifting.nest_roll_raw_mask(
+                    input_resolution, self.window_size, shift_size)
             elif params.shift_strategy == "nest_grid_shift":
                 self.shifter = shifting.NestGridShift(
                     nside=nside, base_pixels=params.base_pixels,
                     window_size=self.window_size)
+                raw_mask = shifting.nest_grid_mask(
+                    nside, list(params.base_pixels), self.window_size)
             elif params.shift_strategy == "nest_grid_shift_exact":
                 self.shifter = shifting.NestGridShiftExact(
                     nside=nside, base_pixels=params.base_pixels,
                     window_size=self.window_size)
+                _, raw_mask = hp_topology.exact_shift_idcs_and_mask(
+                    list(params.base_pixels), nside, self.window_size)
             else:  # "ring_shift" — Params validated the enum
                 self.shifter = shifting.RingShift(
                     nside=nside, base_pixels=params.base_pixels,
                     window_size=self.window_size, shift_size=shift_size)
+                _, raw_mask = shifting.ring_shift_idcs_and_mask(
+                    nside, list(params.base_pixels), self.window_size, shift_size)
+            self.validity = Buffer(jnp.asarray(
+                shifting.validity_from_mask(raw_mask, self.window_size))[:, :, None])
         else:
             self.shifter = shifting.NoShift()
+            self.validity = None
+
+    def _apply_validity(self, w):
+        B_, ws, C = w.shape
+        v = self.validity[...]                       # (nW, ws, 1)
+        return (w.reshape(-1, self.num_windows, ws, C) * v[None]).reshape(B_, ws, C)
+
+    def _mix(self, x):
+        """The spatial mixer: shift -> window -> mask -> conv on the Cartesian
+        grid -> mask -> unwindow -> unshift. Exact identity for a delta kernel."""
+        shifted_x = self.shifter.shift(x)
+        w = window_partition(shifted_x, self.window_size)      # (B*nW, ws, C) nested
+        if self.validity is not None:
+            w = self._apply_validity(w)                        # zero foreign IN
+        B_, ws, C = w.shape
+        g = w[:, self.grid_perm[...], :].reshape(B_, self.grid_size, self.grid_size, C)
+        g = self.dwconv(g)
+        w = g.reshape(B_, ws, C)[:, self.inv_perm[...], :]
+        if self.validity is not None:
+            w = self._apply_validity(w)                        # zero foreign OUT
+        shifted_x = window_reverse(w, self.window_size, self.input_resolution)
+        return self.shifter.shift_back(shifted_x)
 
     def __call__(self, x):
-        shortcut = x
-        shifted_x = self.shifter.shift(x)
-        x_windows = window_partition(shifted_x, self.window_size)
-        mask = None if self.shifter.attn_mask is None else self.shifter.attn_mask[...]
-        attn_windows = self.attn(x_windows, mask=mask)
-        shifted_x = window_reverse(attn_windows, self.window_size, self.input_resolution)
-        x = self.shifter.shift_back(shifted_x)
-
-        x = shortcut + self.drop_path(self.norm1(x))
+        x = x + self.drop_path(self.norm1(self._mix(x)))
         return x + self.drop_path(self.norm2(self.mlp(x)))
 
 
-def _make_blocks(params, dim, input_resolution, depth, num_heads, drop_path, rngs):
-    return [HealSwinBlock(params, dim, input_resolution, num_heads,
+def _drop_path_schedule(params):
+    return [float(v) for v in np.linspace(0, params.drop_path_rate, sum(params.depths))]
+
+
+def _make_blocks(params, dim, input_resolution, depth, drop_path, rngs):
+    return [HealConvBlock(params, dim, input_resolution,
                           shifted=(i % 2 == 1), drop_path=drop_path[i], rngs=rngs)
             for i in range(depth)]
 
 
-class EncoderStage(nnx.Module):
-    def __init__(self, params, dim, input_resolution, depth, num_heads, drop_path,
-                 downsample, *, rngs):
+class ConvEncoderStage(nnx.Module):
+    def __init__(self, params, dim, input_resolution, depth, drop_path, downsample, *, rngs):
         self.use_checkpoint = params.use_checkpoint
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
-                                            num_heads, drop_path, rngs))
+                                            drop_path, rngs))
         self.downsample = PatchMerging(dim=dim, rngs=rngs) if downsample else None
 
     def __call__(self, x):
@@ -271,12 +239,11 @@ class EncoderStage(nnx.Module):
         return x
 
 
-class DecoderStage(nnx.Module):
-    def __init__(self, params, dim, input_resolution, depth, num_heads, drop_path,
-                 upsample, *, rngs):
+class ConvDecoderStage(nnx.Module):
+    def __init__(self, params, dim, input_resolution, depth, drop_path, upsample, *, rngs):
         self.use_checkpoint = params.use_checkpoint
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
-                                            num_heads, drop_path, rngs))
+                                            drop_path, rngs))
         self.upsample = PatchExpand(dim=dim, dim_scale=2, rngs=rngs) if upsample else None
 
     def __call__(self, x):
@@ -287,12 +254,8 @@ class DecoderStage(nnx.Module):
         return x
 
 
-def _drop_path_schedule(params):
-    return [float(v) for v in np.linspace(0, params.drop_path_rate, sum(params.depths))]
-
-
-class HealSwinEncoder(nnx.Module):
-    """Compression-only backbone: patch embed + encoder stages + final norm.
+class HealConvEncoder(nnx.Module):
+    """Compression-only backbone: patch embed + conv encoder stages + final norm.
     Standalone-usable (tokenizer / embedder); allocates no decoder parameters."""
 
     def __init__(self, params, *, rngs):
@@ -307,10 +270,10 @@ class HealSwinEncoder(nnx.Module):
         dpr = _drop_path_schedule(params)
         layers = []
         for i in range(self.num_layers):
-            layers.append(EncoderStage(
+            layers.append(ConvEncoderStage(
                 params, dim=int(params.embed_dim * 2 ** i),
                 input_resolution=num_patches // 4 ** i,
-                depth=params.depths[i], num_heads=params.num_heads[i],
+                depth=params.depths[i],
                 drop_path=dpr[sum(params.depths[:i]):sum(params.depths[:i + 1])],
                 downsample=i < self.num_layers - 1, rngs=rngs))
         self.layers = nnx.List(layers)
@@ -326,7 +289,7 @@ class HealSwinEncoder(nnx.Module):
         return self.norm(x), skips
 
 
-class HealSwinDecoder(nnx.Module):
+class HealConvDecoder(nnx.Module):
     """UNet decoder head producing dense per-pixel outputs."""
 
     def __init__(self, params, *, rngs):
@@ -344,9 +307,9 @@ class HealSwinDecoder(nnx.Module):
             if i_layer == 0:
                 layers_up.append(PatchExpand(dim=dim, dim_scale=2, rngs=rngs))
             else:
-                layers_up.append(DecoderStage(
+                layers_up.append(ConvDecoderStage(
                     params, dim=dim, input_resolution=num_patches // 4 ** down_idx,
-                    depth=params.depths[down_idx], num_heads=params.num_heads[down_idx],
+                    depth=params.depths[down_idx],
                     drop_path=dpr[sum(params.depths[:down_idx]):
                                   sum(params.depths[:down_idx + 1])],
                     upsample=down_idx > 0, rngs=rngs))
@@ -371,12 +334,12 @@ class HealSwinDecoder(nnx.Module):
         return self.output(x)  # (B, npix, out_channels) channels-last
 
 
-class HealSwin(nnx.Module):
-    """HEALPix Swin V2 U-Net: HealSwinEncoder + HealSwinDecoder."""
+class HealConv(nnx.Module):
+    """HEALPix depthwise-conv U-Net: HealConvEncoder + HealConvDecoder."""
 
     def __init__(self, params, *, rngs):
-        self.encoder = HealSwinEncoder(params, rngs=rngs)
-        self.decoder = HealSwinDecoder(params, rngs=rngs)
+        self.encoder = HealConvEncoder(params, rngs=rngs)
+        self.decoder = HealConvDecoder(params, rngs=rngs)
 
     def __call__(self, x):
         tokens, skips = self.encoder(x)

@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from heal_swin_nnx.hp import shifting as hps
 from heal_swin_nnx.hp import topology as hpt
@@ -182,3 +183,55 @@ def test_exact_shift_module_roundtrip():
         sh = hps.NestGridShiftExact(nside=16, base_pixels=base_pixels, window_size=4)
         x = jnp.arange(1 * npix * 2, dtype=jnp.float32).reshape(1, npix, 2)
         assert np.array_equal(sh.shift_back(sh.shift(x)), x), base_pixels
+
+
+# --- raw masks + majority-region validity (HealConv support) ---------------
+
+
+def test_nest_roll_raw_mask_matches_previous_inline_construction():
+    input_resolution, ws, ss = 256, 16, 8
+    img_mask = np.zeros(input_resolution, dtype=np.float32)
+    for cnt, s in enumerate((slice(0, -ws), slice(-ws, -ss), slice(-ss, None))):
+        img_mask[s] = cnt
+    np.testing.assert_array_equal(
+        hps.nest_roll_raw_mask(input_resolution, ws, ss), img_mask)
+    # the public pairwise mask must be exactly the wrapper composition
+    np.testing.assert_array_equal(
+        hps.nest_roll_mask(input_resolution, ws, ss),
+        hps.get_attn_mask_from_mask(
+            hps.nest_roll_raw_mask(input_resolution, ws, ss), ws))
+
+
+def test_validity_from_mask_majority_and_deterministic_ties():
+    # ws=4: window 0 has majority label 0; window 1 is a 2-2 tie -> lowest label (2) wins
+    raw = np.array([0, 0, 0, 1, 3, 3, 2, 2], dtype=np.float32)
+    v = hps.validity_from_mask(raw, 4)
+    np.testing.assert_array_equal(v, np.array([[1, 1, 1, 0], [0, 0, 1, 1]], dtype=np.float32))
+    assert v.dtype == np.float32
+
+
+def _raw_mask_for(strategy, nside, base_pixels, ws, ss):
+    if strategy == "nest_roll":
+        return hps.nest_roll_raw_mask(len(base_pixels) * nside ** 2, ws, ss)
+    if strategy == "nest_grid_shift":
+        return hps.nest_grid_mask(nside, list(base_pixels), ws)
+    if strategy == "nest_grid_shift_exact":
+        return hpt.exact_shift_idcs_and_mask(list(base_pixels), nside, ws)[1]
+    return hps.ring_shift_idcs_and_mask(nside, list(base_pixels), ws, ss)[1]
+
+
+@pytest.mark.parametrize("strategy", ["nest_roll", "nest_grid_shift",
+                                      "nest_grid_shift_exact", "ring_shift"])
+def test_validity_consistent_with_attn_mask(strategy):
+    # a pixel is invalid (0) iff the pairwise attention mask forbids it (-100)
+    # against its window's majority pixels
+    nside, base_pixels, ws, ss = 8, tuple(range(12)), 16, 8
+    raw = _raw_mask_for(strategy, nside, base_pixels, ws, ss)
+    attn = hps.get_attn_mask_from_mask(raw, ws)
+    v = hps.validity_from_mask(raw, ws)
+    assert v.shape == attn.shape[:2]
+    for w in range(v.shape[0]):
+        maj = int(np.argmax(v[w]))            # some majority pixel (v==1 exists by construction)
+        assert v[w, maj] == 1.0
+        for p in range(ws):
+            assert (v[w, p] == 0.0) == (attn[w, p, maj] == -100.0)

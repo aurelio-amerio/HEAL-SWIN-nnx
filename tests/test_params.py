@@ -143,3 +143,66 @@ def test_swin_params_rope_head_dim_check():
                    depths=(2, 2), num_heads=(2, 4), pos_embed="rope_mixed")
     SwinParams(img_size=(32, 32), in_channels=1, out_channels=1, embed_dim=16,
                depths=(2, 2), num_heads=(2, 4), pos_embed="rope_mixed")
+
+
+# --- HealConvParams ---------------------------------------------------------
+from heal_swin_nnx.models.healconv import HealConvParams
+
+
+def test_healconv_defaults_and_derived_window():
+    p = HealConvParams(nside=32, in_channels=3, out_channels=5)
+    assert p.base_pixels == tuple(range(12))
+    assert p.kernel_size == 4 and p.window_size == 16 and p.shift_size == 8
+    assert p.shift_strategy == "nest_grid_shift_exact"
+    assert p.depths == (2, 2, 2, 2)
+    assert p.npix == 12 * 32 ** 2
+
+
+def test_healconv_params_serializable():
+    json.dumps(dataclasses.asdict(HealConvParams(nside=32, in_channels=3, out_channels=5)))
+
+
+@pytest.mark.parametrize("bad_k", [0, 1, 3, 6, -4])
+def test_healconv_kernel_size_must_be_power_of_two(bad_k):
+    with pytest.raises(ValueError, match="kernel_size"):
+        HealConvParams(nside=32, in_channels=1, out_channels=1, kernel_size=bad_k)
+
+
+def test_healconv_valid_kernel_sizes_accepted():
+    for k in (2, 4, 8):
+        p = HealConvParams(nside=64, in_channels=1, out_channels=1, kernel_size=k,
+                           depths=(2, 2), embed_dim=16)
+        assert p.window_size == k ** 2
+
+
+def test_healconv_bottleneck_must_hold_whole_windows():
+    # nside=16, patch_size=4, 4 stages -> bottleneck = 12*256/4/64 = 12 pixels,
+    # not divisible by window_size=16: the clamped window would not be a power
+    # of four, so params must reject this up front.
+    with pytest.raises(ValueError, match="divisible"):
+        HealConvParams(nside=16, in_channels=1, out_channels=1)
+    # nside=32 bottleneck = 48, divisible by 16 -> fine
+    HealConvParams(nside=32, in_channels=1, out_channels=1)
+    # kernel_size=2 (window 4) at nside=16 -> bottleneck 12 divisible by 4 -> fine
+    HealConvParams(nside=16, in_channels=1, out_channels=1, kernel_size=2)
+
+
+def test_healconv_inherited_geometry_rules():
+    with pytest.raises(ValueError):  # nside not a power of two
+        HealConvParams(nside=12, in_channels=1, out_channels=1)
+    with pytest.raises(ValueError):  # bad base_pixels ordering
+        HealConvParams(nside=32, in_channels=1, out_channels=1, base_pixels=[3, 2])
+    with pytest.raises(ValueError):  # unknown shift strategy
+        HealConvParams(nside=32, in_channels=1, out_channels=1, shift_strategy="roll")
+    with pytest.raises(ValueError):  # patch_size not a multiple of 4
+        HealConvParams(nside=32, in_channels=1, out_channels=1, patch_size=3)
+
+
+def test_healconv_nest_grid_shift_requires_window_sized_bottleneck():
+    # nside=32, patch_size=4, 4 stages -> per-face bottleneck nside^2 = 4 < 16
+    with pytest.raises(ValueError, match="nest_grid_shift"):
+        HealConvParams(nside=32, in_channels=1, out_channels=1,
+                       shift_strategy="nest_grid_shift")
+    # 3 stages -> per-face bottleneck 16 >= 16 -> fine
+    HealConvParams(nside=32, in_channels=1, out_channels=1, depths=(2, 2, 2),
+                   shift_strategy="nest_grid_shift")
