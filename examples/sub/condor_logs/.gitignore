@@ -1,0 +1,3 @@
+# Keep this directory (HTCondor writes job log/out/err here) but not the logs.
+*
+!.gitignore

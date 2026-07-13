@@ -1,0 +1,25 @@
+# HTCondor submit file for the spherical-MNIST HealSwin classifier.
+#
+# Submit from this directory:
+#     condor_submit mnist_healpix_classify.sub
+#
+# Edit `repo_root` if your checkout lives elsewhere.
+repo_root = /lustre/ific.uv.es/ml/ific088/github/HEAL-SWIN-nnx
+
+universe   = vanilla
+executable = run_mnist_healpix_classify.sh
+arguments  = "$(repo_root)"
+getenv     = True
+
+request_cpus   = 8
+request_memory = 32 GB
+request_gpus   = 1
+# The model is float32, so any CUDA GPU works — no A100/bf16 requirement.
+# Uncomment to pin a specific class of node on this cluster:
+# +UseNvidiaA100 = True
+
+log    = condor_logs/mnist_healpix_classify.log
+output = condor_logs/mnist_healpix_classify.out
+error  = condor_logs/mnist_healpix_classify.err
+
+queue
