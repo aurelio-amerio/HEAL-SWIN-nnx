@@ -68,6 +68,7 @@ WARMUP_FRAC = 0.05
 EMBED_DIM = 32
 DEPTHS = (2, 2, 6, 2)
 NUM_HEADS = (4, 8, 16, 16)
+WINDOW_SIZE = 16  # 4x4 windows; max allowed by the 4x4-per-face bottleneck of this 4-stage config
 NUM_WORKERS = min(8, max(1, (os.cpu_count() or 2) - 2))
 SEED = 0
 RESULTS_FILE = os.path.join(os.path.dirname(__file__), "mnist_healpix_classify_results.txt")
@@ -95,6 +96,7 @@ def make_params() -> HealSwinParams:
         embed_dim=EMBED_DIM,
         depths=DEPTHS,
         num_heads=NUM_HEADS,
+        window_size=WINDOW_SIZE,
     )
 
 
@@ -151,7 +153,8 @@ def evaluate(model, test_ds):
 
 def main():
     header = (f"workers={NUM_WORKERS} batch={BATCH_SIZE} epochs={EPOCHS} "
-              f"nside={NSIDE} embed_dim={EMBED_DIM} depths={DEPTHS}")
+              f"nside={NSIDE} embed_dim={EMBED_DIM} depths={DEPTHS} "
+              f"window_size={WINDOW_SIZE}")
     print(header)
     results_file = open(RESULTS_FILE, "w")
     results_file.write(header + "\n")
