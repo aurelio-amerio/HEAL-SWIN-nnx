@@ -1,0 +1,27 @@
+# HTCondor submit file for the spherical-MNIST HealConv classifier.
+#
+#     condor_submit examples/sub/mnist_healpix_classify_conv_a100.sub
+#
+# `initialdir` makes the executable and condor_logs/ paths below resolve
+# relative to this file's own directory, so it can be submitted from anywhere.
+# Edit `repo_root` if your checkout lives elsewhere.
+repo_root = /lustre/ific.uv.es/ml/ific088/github/HEAL-SWIN-nnx
+
+universe   = vanilla
+initialdir = $(repo_root)/examples/sub
+executable = run_mnist_healpix_classify_conv.sh
+arguments  = "$(repo_root)"
+getenv     = True
+
+request_cpus   = 8
+request_memory = 32 GB
+request_gpus   = 1
+
++UseNvidiaA100 = True
+
+
+log    = condor_logs/mnist_healpix_classify_conv_a100.log
+output = condor_logs/mnist_healpix_classify_conv_a100.out
+error  = condor_logs/mnist_healpix_classify_conv_a100.err
+
+queue

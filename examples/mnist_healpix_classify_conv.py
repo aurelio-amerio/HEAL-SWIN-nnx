@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Train a lightweight HealSwin classifier on spherical MNIST (nside 64).
+"""Train a lightweight HealConv classifier on spherical MNIST (nside 64).
 
-MNIST digits are ray-traced onto full-sphere HEALPix maps under random
-rotations (see :mod:`mnist_healpix_dataset`). A HEALPix-native Swin encoder
-compresses each map to bottleneck tokens; mean-pooling + a linear head predict
-the digit class. Trains on 100k projected samples, validates on 10k fixed test
-samples.
+Convolutional counterpart to ``mnist_healpix_classify.py``: instead of the
+HEALPix-native Swin *transformer* encoder, this uses the HealConv encoder, whose
+in-window mixer is a depthwise k x k convolution over each window's Cartesian
+grid (ConvNeXt/MetaFormer factorization) — no attention. MNIST digits are
+ray-traced onto full-sphere HEALPix maps under random rotations (see
+:mod:`mnist_healpix_dataset`). The encoder compresses each map to bottleneck
+tokens; mean-pooling + a linear head predict the digit class. Trains on 100k
+projected samples, validates on 10k fixed test samples.
 
 Run headless. The script defaults to the GPU (``JAX_PLATFORMS=cuda``) and will
 fail fast on a machine with no CUDA device — set ``JAX_PLATFORMS=cpu`` to force
 CPU. Spawned grain data-loader workers are always pinned to CPU (see below).
 
-    uv run --extra examples python examples/mnist_healpix_classify.py
+    uv run --extra examples python examples/mnist_healpix_classify_conv.py
 
 Or submit it to a GPU node via HTCondor: ``examples/sub/mnist_healpix_classify.sub``.
 """
@@ -45,7 +48,7 @@ from absl import flags
 
 import grain
 
-from heal_swin_nnx import HealSwinEncoder, HealSwinParams
+from heal_swin_nnx import HealConvEncoder, HealConvParams
 from mnist_healpix_dataset import make_mnist_healpix_dataset
 
 # grain's mp_prefetch reads absl flags (e.g. --grain_enable_multiprocess_worker_
@@ -67,18 +70,18 @@ WEIGHT_DECAY = 0.05
 WARMUP_FRAC = 0.05
 EMBED_DIM = 32
 DEPTHS = (2, 2, 6, 2)
-NUM_HEADS = (4, 8, 16, 16)
+KERNEL_SIZE = 4            # k x k depthwise kernel; window = k^2 pixels
 NUM_WORKERS = min(8, max(1, (os.cpu_count() or 2) - 2))
 SEED = 0
-RESULTS_FILE = os.path.join(os.path.dirname(__file__), "mnist_healpix_classify_results.txt")
+RESULTS_FILE = os.path.join(os.path.dirname(__file__), "mnist_healpix_classify_conv_results.txt")
 # ------------------------------------------------------------------------
 
 
-class HealSwinClassifier(nnx.Module):
-    """HealSwin encoder + mean-pool over tokens + linear classification head."""
+class HealConvClassifier(nnx.Module):
+    """HealConv encoder + mean-pool over tokens + linear classification head."""
 
-    def __init__(self, params: HealSwinParams, num_classes: int, *, rngs: nnx.Rngs):
-        self.encoder = HealSwinEncoder(params, rngs=rngs)
+    def __init__(self, params: HealConvParams, num_classes: int, *, rngs: nnx.Rngs):
+        self.encoder = HealConvEncoder(params, rngs=rngs)
         self.head = nnx.Linear(self.encoder.num_features, num_classes, rngs=rngs)
 
     def __call__(self, x):  # x: (B, npix, in_channels)
@@ -87,14 +90,14 @@ class HealSwinClassifier(nnx.Module):
         return self.head(pooled)                   # (B, num_classes)
 
 
-def make_params() -> HealSwinParams:
-    return HealSwinParams(
+def make_params() -> HealConvParams:
+    return HealConvParams(
         nside=NSIDE,
         in_channels=1,
         out_channels=NUM_CLASSES,  # required by dataclass; unused by the head
         embed_dim=EMBED_DIM,
         depths=DEPTHS,
-        num_heads=NUM_HEADS,
+        kernel_size=KERNEL_SIZE,
     )
 
 
@@ -151,7 +154,8 @@ def evaluate(model, test_ds):
 
 def main():
     header = (f"workers={NUM_WORKERS} batch={BATCH_SIZE} epochs={EPOCHS} "
-              f"nside={NSIDE} embed_dim={EMBED_DIM} depths={DEPTHS}")
+              f"nside={NSIDE} embed_dim={EMBED_DIM} depths={DEPTHS} "
+              f"kernel_size={KERNEL_SIZE}")
     print(header)
     results_file = open(RESULTS_FILE, "w")
     results_file.write(header + "\n")
@@ -169,7 +173,7 @@ def main():
     )
     tx = optax.adamw(schedule, weight_decay=WEIGHT_DECAY)
 
-    model = HealSwinClassifier(make_params(), NUM_CLASSES, rngs=nnx.Rngs(SEED))
+    model = HealConvClassifier(make_params(), NUM_CLASSES, rngs=nnx.Rngs(SEED))
     model.train()
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
@@ -199,7 +203,7 @@ if __name__ == "__main__" and os.environ.get("SMOKE") != "1":
 
 if __name__ == "__main__" and os.environ.get("SMOKE") == "1":
     # Forward-shape smoke check: no data, just a random map.
-    model = HealSwinClassifier(make_params(), NUM_CLASSES, rngs=nnx.Rngs(0))
+    model = HealConvClassifier(make_params(), NUM_CLASSES, rngs=nnx.Rngs(0))
     model.eval()
     npix = 12 * NSIDE ** 2
     x = jnp.zeros((2, npix, 1), dtype=jnp.float32)
