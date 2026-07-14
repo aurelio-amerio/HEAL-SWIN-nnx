@@ -1,0 +1,34 @@
+# HTCondor submit file: HealSwin shift x pos-embed ablation on spherical MNIST.
+#
+#     condor_submit examples/sub/mnist_healpix_ablation_a100.sub
+#
+# Queues the 6 deduped (pos_embed, shift_strategy) configs as separate jobs.
+# `initialdir` makes the executable and condor_logs/ paths below resolve
+# relative to this file's own directory, so it can be submitted from anywhere.
+# Edit `repo_root` if your checkout lives elsewhere.
+repo_root = /lustre/ific.uv.es/ml/ific088/github/HEAL-SWIN-nnx
+
+universe   = vanilla
+initialdir = $(repo_root)/examples/sub
+executable = run_mnist_healpix_ablation.sh
+arguments  = "$(repo_root) $(pos_embed) $(shift_strategy)"
+getenv     = True
+
+request_cpus   = 8
+request_memory = 32 GB
+request_gpus   = 1
+
++UseNvidiaA100 = True
+
+log    = condor_logs/ablation_$(pos_embed)_$(shift_strategy).log
+output = condor_logs/ablation_$(pos_embed)_$(shift_strategy).out
+error  = condor_logs/ablation_$(pos_embed)_$(shift_strategy).err
+
+queue pos_embed, shift_strategy from (
+    rope_mixed, nest_roll
+    rope_mixed, nest_grid_shift
+    rope_mixed, nest_grid_shift_exact
+    rope_mixed, ring_shift
+    rel_bias, nest_grid_shift_exact
+    rope_axial, nest_grid_shift_exact
+)
