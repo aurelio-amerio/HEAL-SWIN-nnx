@@ -4,9 +4,10 @@
 A HEALPix-native Swin encoder compresses each nside-64 spherical map to 48
 bottleneck tokens (nside 2, 512 features), which condition a gensbi Flux1
 flow-matching model over the 3-dim posterior (logA, n, alpha) of the
-sbibm-jax `spherical_grf` task. Training data is simulated online (healpy
-backend, CPU spawn workers); the loader interface matches the future offline
-TaskDataset so the swap is constructor-only. Design doc:
+sbibm-jax `spherical_grf` task. Training data streams from the published
+HF dataset (offline TaskDataset, NEST ordering, Hub normalization stats;
+first use downloads ~24 GB into the HF cache). TARP pairs are still
+simulated fresh via the task's healpy simulator. Design doc:
 docs/superpowers/specs/2026-07-18-spherical-grf-flowmatch-example-design.md
 
 Run headless. The script defaults to the GPU (``JAX_PLATFORMS=cuda``) and
@@ -21,7 +22,7 @@ Debug modes (both CPU-safe):
     SMOKE=1 JAX_PLATFORMS=cpu uv run python examples/spherical_grf_flowmatch.py
         forward-shape check, no data, no training
     QUICK=1 JAX_PLATFORMS=cpu uv run python examples/spherical_grf_flowmatch.py
-        tiny end-to-end run (few sims, few steps, few samples)
+        tiny end-to-end run (few steps, few samples)
 """
 
 from __future__ import annotations
@@ -37,7 +38,6 @@ if __name__ != "__main__":
 else:
     os.environ.setdefault("JAX_PLATFORMS", "cuda")
 
-import math
 import time
 
 import jax
@@ -62,8 +62,7 @@ from gensbi.utils.plotting import plot_marginals
 from gensbi.diagnostics import run_tarp, plot_tarp
 
 from sbibm_jax.tasks import get_task
-from sbibm_jax.tasks.spherical_grf.task import PRIOR_LOW, PRIOR_HIGH
-from sbibm_jax.data import OnlineTaskDataset
+from sbibm_jax.data import TaskDataset
 
 # grain's mp_prefetch reads absl flags; parse argv once so a plain
 # `python ...` run doesn't hit UnparsedFlagAccessError on first prefetch.
@@ -98,7 +97,6 @@ SEED = 0
 BATCH_SIZE = 8 if QUICK else 128
 VAL_BATCH_SIZE = 8 if QUICK else 256
 NSTEPS = 5 if QUICK else 20_000
-WARMUP_SIMS = 32 if QUICK else 512
 NUM_WORKERS = 0 if QUICK else min(8, max(1, (os.cpu_count() or 2) - 2))
 TRAIN_MODEL = True
 RESTORE_MODEL = False
@@ -106,15 +104,9 @@ RESTORE_MODEL = False
 # evaluation
 EVAL_OBSERVATIONS = (1,) if QUICK else (1, 2, 3)
 NUM_POSTERIOR_SAMPLES = 64 if QUICK else 10_000
-# NOTE: gensbi 0.4.0's sample_batched accepts chunk_size but never applies it —
-# sampling runs as ONE batched ODE solve (cond stays batch-1; Flux1 broadcasts).
-# The chunk knobs are kept for when upstream implements chunking; if the full
-# run OOMs, split the samples across multiple sample_batched calls instead.
-SAMPLE_CHUNK = 64 if QUICK else 500
 SAMPLE_STEP_SIZE = 0.25 if QUICK else 0.01
 TARP_PAIRS = 2 if QUICK else 200
 TARP_POSTERIOR_SAMPLES = 8 if QUICK else 1_000
-TARP_CHUNK = 2 if QUICK else 100
 
 EXPERIMENT_ID = "spherical_grf_fm_quick" if QUICK else "spherical_grf_fm"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -122,10 +114,6 @@ CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints", EXPERIMENT_ID)
 IMGS_DIR = os.path.join(BASE_DIR, "imgs")
 RESULTS_FILE = os.path.join(BASE_DIR, f"{EXPERIMENT_ID}_results.txt")
 # ------------------------------------------------------------------------
-
-# Uniform prior box -> analytic normalization stats.
-THETA_MEAN = tuple((lo + hi) / 2.0 for lo, hi in zip(PRIOR_LOW, PRIOR_HIGH))
-THETA_STD = tuple((hi - lo) / math.sqrt(12.0) for lo, hi in zip(PRIOR_LOW, PRIOR_HIGH))
 
 
 def make_encoder_params() -> HealSwinParams:
@@ -175,51 +163,21 @@ class SphericalGRFModel(nnx.Module):
                          guidance=guidance)
 
 
-def normalize_theta(theta):
-    return (np.asarray(theta) - np.asarray(THETA_MEAN)) / np.asarray(THETA_STD)
-
-
-def unnormalize_theta(theta):
-    return np.asarray(theta) * np.asarray(THETA_STD) + np.asarray(THETA_MEAN)
-
-
-def compute_x_stats(task, num_sims, seed):
-    """Global scalar x mean/std from a warmup batch of prior simulations.
-
-    The field is isotropic, so a single scalar pair suffices (matches the
-    published metadata's x stats axes (0, 1)). Ordering-independent, so the
-    RING simulator output can be used directly.
-    """
-    sim = task.get_simulator(jax.random.PRNGKey(seed))
-    kt, ks = jax.random.split(jax.random.PRNGKey(seed + 1))
-    theta = task.get_prior(kt, num_sims)
-    x = np.asarray(sim(ks, theta))
-    return float(x.mean()), float(x.std())
-
-
 def make_datasets():
-    """OnlineTaskDataset + train/val loaders of normalized NEST (theta, x) batches.
+    """Offline HF TaskDataset + train/val loaders of normalized NEST (theta, x) batches.
 
-    Offline swap (once the HF dataset is published): replace this body with
-    TaskDataset("spherical_grf", ordering="nest", normalize=True) and its
-    get_train_loader/get_val_loader — stats then come from Hub metadata.
+    First use downloads the spherical_grf config (~24 GB) into the HF cache
+    (respects HF_HOME); afterwards everything is served locally.
+    Normalization stats come from the published Hub metadata.
     """
-    task = get_task("spherical_grf")
-    x_mean, x_std = compute_x_stats(task, WARMUP_SIMS, SEED + 100)
-    stats = {
-        "theta_mean": list(THETA_MEAN), "theta_std": list(THETA_STD),
-        "x_mean": x_mean, "x_std": x_std,
-    }
-    ds = OnlineTaskDataset(
-        "spherical_grf", task_kwargs={}, ordering="nest",
-        normalize=True, stats=stats, seed=SEED,
+    ds = TaskDataset(
+        "spherical_grf", ordering="nest", normalize=True,
+        seed=SEED, max_workers=NUM_WORKERS,
     )
-    train_loader = ds.get_online_train_loader(
-        BATCH_SIZE, seed=SEED, num_workers=NUM_WORKERS)
-    # The pipeline draws one fixed val batch; simulate it in-process.
-    val_loader = ds.get_online_train_loader(
-        VAL_BATCH_SIZE, seed=SEED + 1, num_workers=0)
-    return ds, stats, train_loader, val_loader
+    train_loader = ds.get_train_loader(BATCH_SIZE)
+    # The pipeline draws one fixed val batch at train start.
+    val_loader = ds.get_val_loader(VAL_BATCH_SIZE)
+    return ds, train_loader, val_loader
 
 
 def prep_x(x_ring, ds):
@@ -228,35 +186,12 @@ def prep_x(x_ring, ds):
     Mirrors the training collate exactly: permute, tokenize, normalize.
     """
     x = np.asarray(x_ring)[:, ds._x_perm][..., None]
-    x = (x - ds.x_mean) / ds.x_std
-    return jnp.asarray(x, dtype=jnp.float32)
-
-
-# gensbi 0.4.0 passes the experiment_id *string* as the orbax checkpoint
-# step, which orbax-checkpoint 0.12.1 rejects (TypeError during step
-# directory formatting). Checkpoints are already namespaced by
-# CHECKPOINT_DIR, so pin the step to 0 for both save and restore until
-# gensbi fixes this upstream.
-_orig_save_model = ConditionalPipeline.save_model
-_orig_restore_model = ConditionalPipeline.restore_model
-
-
-def _save_model_step0(self, experiment_id=None):
-    return _orig_save_model(self, 0)
-
-
-def _restore_model_step0(self, experiment_id=None):
-    return _orig_restore_model(self, 0)
-
-
-ConditionalPipeline.save_model = _save_model_step0
-ConditionalPipeline.restore_model = _restore_model_step0
+    return jnp.asarray(ds.normalize_x(x), dtype=jnp.float32)
 
 
 def make_training_config():
     cfg = ConditionalPipeline.get_default_training_config()
     cfg["nsteps"] = NSTEPS
-    cfg["experiment_id"] = EXPERIMENT_ID
     cfg["checkpoint_dir"] = CHECKPOINT_DIR
     if QUICK:
         cfg["warmup_steps"] = 2
@@ -278,21 +213,22 @@ def make_pipeline(model, train_loader, val_loader):
 
 def evaluate(pipeline, ds, log):
     """Posterior vs reference for canonical observations, then TARP."""
-    task = ds.task
     key = jax.random.PRNGKey(SEED + 7)
     labels = list(THETA_LABELS)
 
     for i in EVAL_OBSERVATIONS:
-        x_o = prep_x(np.asarray(task.get_observation(i)), ds)  # (1, NPIX, 1)
-        theta_true = np.asarray(task.get_true_parameters(i))[0]
-        ref = np.asarray(task.get_reference_posterior_samples(i))
+        x_raw, ref = ds.get_reference(i)                  # RING map, (S, 3) ref
+        x_o = prep_x(np.asarray(x_raw).reshape(1, -1), ds)  # (1, NPIX, 1)
+        theta_true = np.asarray(ds.get_true_parameters(i)).reshape(-1)
+        ref = np.asarray(ref)
         key, sk = jax.random.split(key)
         t0 = time.time()
-        samples = pipeline.sample_batched(
-            sk, x_o, NUM_POSTERIOR_SAMPLES,
-            chunk_size=SAMPLE_CHUNK, step_size=SAMPLE_STEP_SIZE,
+        # One condition -> sample; sample_batched is for batches of conditions.
+        samples = pipeline.sample(
+            sk, x_o, NUM_POSTERIOR_SAMPLES, step_size=SAMPLE_STEP_SIZE,
         )
-        flow = unnormalize_theta(np.asarray(samples)[:, 0, :, 0])  # (S, 3)
+        # ds theta stats are tokenized (1, 3, 1); un-tokenize after unnorm.
+        flow = np.asarray(ds.unnormalize_theta(np.asarray(samples)))[:, :, 0]  # (S, 3)
         log(f"obs {i}: {flow.shape[0]} samples in {time.time() - t0:.0f}s | "
             f"true {np.array2string(theta_true, precision=3)} | "
             f"flow mean {np.array2string(flow.mean(0), precision=3)} "
@@ -326,7 +262,7 @@ def evaluate(pipeline, ds, log):
 
 def tarp_diagnostic(pipeline, ds, log, key):
     """TARP coverage on freshly simulated pairs (normalized theta space)."""
-    task = ds.task
+    task = get_task("spherical_grf")
     kt, ks, kp = jax.random.split(key, 3)
     sim = task.get_simulator(jax.random.PRNGKey(SEED + 300))
     theta = np.asarray(task.get_prior(kt, TARP_PAIRS))       # (P, 3)
@@ -334,12 +270,12 @@ def tarp_diagnostic(pipeline, ds, log, key):
     x = np.asarray(sim(ks, jnp.asarray(theta)))               # (P, NPIX) RING
     x_tok = prep_x(x, ds)
     post = pipeline.sample_batched(
-        kp, x_tok, TARP_POSTERIOR_SAMPLES,
-        chunk_size=TARP_CHUNK, step_size=SAMPLE_STEP_SIZE,
+        kp, x_tok, TARP_POSTERIOR_SAMPLES, step_size=SAMPLE_STEP_SIZE,
     )
     post = np.asarray(post)[:, :, :, 0]                       # (S, P, 3)
-    res = run_tarp(jnp.asarray(normalize_theta(theta)), jnp.asarray(post),
-                   bootstrap=False)
+    # ds theta stats are tokenized (1, 3, 1): tokenize, normalize, un-tokenize.
+    theta_norm = np.asarray(ds.normalize_theta(theta[..., None]))[:, :, 0]
+    res = run_tarp(jnp.asarray(theta_norm), jnp.asarray(post), bootstrap=False)
     plot_tarp(res, mode="both")
     plt.savefig(os.path.join(IMGS_DIR, f"{EXPERIMENT_ID}_tarp.png"),
                 dpi=100, bbox_inches="tight")
@@ -363,9 +299,10 @@ def main():
         f"heads={FLUX_NUM_HEADS} ids={ID_EMBEDDING}")
 
     t0 = time.time()
-    ds, stats, train_loader, val_loader = make_datasets()
-    log(f"x stats from {WARMUP_SIMS} warmup sims: mean={stats['x_mean']:.6g} "
-        f"std={stats['x_std']:.6g} ({time.time() - t0:.1f}s)")
+    ds, train_loader, val_loader = make_datasets()
+    log(f"data: HF {ds.repo}/spherical_grf, Hub stats "
+        f"x_mean={float(np.ravel(ds.x_mean)[0]):.6g} "
+        f"x_std={float(np.ravel(ds.x_std)[0]):.6g} ({time.time() - t0:.1f}s)")
 
     model = SphericalGRFModel(rngs=nnx.Rngs(SEED))
     pipeline = make_pipeline(model, train_loader, val_loader)
