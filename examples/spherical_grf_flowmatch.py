@@ -272,6 +272,78 @@ def make_pipeline(model, train_loader, val_loader):
     )
 
 
+def evaluate(pipeline, ds, log):
+    """Posterior vs reference for canonical observations, then TARP."""
+    task = ds.task
+    key = jax.random.PRNGKey(SEED + 7)
+    labels = list(THETA_LABELS)
+
+    for i in EVAL_OBSERVATIONS:
+        x_o = prep_x(np.asarray(task.get_observation(i)), ds)  # (1, NPIX, 1)
+        theta_true = np.asarray(task.get_true_parameters(i))[0]
+        ref = np.asarray(task.get_reference_posterior_samples(i))
+        key, sk = jax.random.split(key)
+        t0 = time.time()
+        samples = pipeline.sample_batched(
+            sk, x_o, NUM_POSTERIOR_SAMPLES,
+            chunk_size=SAMPLE_CHUNK, step_size=SAMPLE_STEP_SIZE,
+        )
+        flow = unnormalize_theta(np.asarray(samples)[:, 0, :, 0])  # (S, 3)
+        log(f"obs {i}: {flow.shape[0]} samples in {time.time() - t0:.0f}s | "
+            f"true {np.array2string(theta_true, precision=3)} | "
+            f"flow mean {np.array2string(flow.mean(0), precision=3)} "
+            f"std {np.array2string(flow.std(0), precision=3)} | "
+            f"ref mean {np.array2string(ref.mean(0), precision=3)} "
+            f"std {np.array2string(ref.std(0), precision=3)}")
+
+        # Overlay: reference (blue) under flow posterior (orange).
+        fig = corner(ref, labels=labels, truths=list(theta_true), color="C0",
+                     hist_kwargs={"density": True},
+                     plot_contours=not QUICK, plot_density=not QUICK)
+        corner(flow, fig=fig, color="C1", hist_kwargs={"density": True},
+               plot_contours=not QUICK, plot_density=not QUICK)
+        fig.suptitle(f"obs {i}: reference (blue) vs flow (orange)")
+        fig.savefig(os.path.join(IMGS_DIR, f"{EXPERIMENT_ID}_overlay_obs{i}.png"),
+                    dpi=100, bbox_inches="tight")
+        plt.close(fig)
+
+        # Separate corners, in case the overlay hides one under the other.
+        plot_marginals(ref, true_param=theta_true, labels=labels, gridsize=30)
+        plt.savefig(os.path.join(IMGS_DIR, f"{EXPERIMENT_ID}_reference_obs{i}.png"),
+                    dpi=100, bbox_inches="tight")
+        plt.close("all")
+        plot_marginals(flow, true_param=theta_true, labels=labels, gridsize=30)
+        plt.savefig(os.path.join(IMGS_DIR, f"{EXPERIMENT_ID}_flow_obs{i}.png"),
+                    dpi=100, bbox_inches="tight")
+        plt.close("all")
+
+    tarp_diagnostic(pipeline, ds, log, key)
+
+
+def tarp_diagnostic(pipeline, ds, log, key):
+    """TARP coverage on freshly simulated pairs (normalized theta space)."""
+    task = ds.task
+    kt, ks, kp = jax.random.split(key, 3)
+    sim = task.get_simulator(jax.random.PRNGKey(SEED + 300))
+    theta = np.asarray(task.get_prior(kt, TARP_PAIRS))       # (P, 3)
+    t0 = time.time()
+    x = np.asarray(sim(ks, jnp.asarray(theta)))               # (P, NPIX) RING
+    x_tok = prep_x(x, ds)
+    post = pipeline.sample_batched(
+        kp, x_tok, TARP_POSTERIOR_SAMPLES,
+        chunk_size=TARP_CHUNK, step_size=SAMPLE_STEP_SIZE,
+    )
+    post = np.asarray(post)[:, :, :, 0]                       # (S, P, 3)
+    res = run_tarp(jnp.asarray(normalize_theta(theta)), jnp.asarray(post),
+                   bootstrap=False)
+    plot_tarp(res, mode="both")
+    plt.savefig(os.path.join(IMGS_DIR, f"{EXPERIMENT_ID}_tarp.png"),
+                dpi=100, bbox_inches="tight")
+    plt.close("all")
+    log(f"TARP: {TARP_PAIRS} pairs x {TARP_POSTERIOR_SAMPLES} samples "
+        f"in {time.time() - t0:.0f}s -> {EXPERIMENT_ID}_tarp.png")
+
+
 def main():
     os.makedirs(IMGS_DIR, exist_ok=True)
     results_file = open(RESULTS_FILE, "w")
@@ -303,7 +375,7 @@ def main():
     if RESTORE_MODEL:
         pipeline.restore_model()
 
-    # evaluation added in the next section
+    evaluate(pipeline, ds, log)
     results_file.close()
 
 
