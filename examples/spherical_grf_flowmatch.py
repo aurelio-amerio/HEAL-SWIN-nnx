@@ -106,7 +106,11 @@ RESTORE_MODEL = False
 # evaluation
 EVAL_OBSERVATIONS = (1,) if QUICK else (1, 2, 3)
 NUM_POSTERIOR_SAMPLES = 64 if QUICK else 10_000
-SAMPLE_CHUNK = 64 if QUICK else 500       # encoder reruns per ODE step: keep chunks GPU-sized
+# NOTE: gensbi 0.4.0's sample_batched accepts chunk_size but never applies it —
+# sampling runs as ONE batched ODE solve (cond stays batch-1; Flux1 broadcasts).
+# The chunk knobs are kept for when upstream implements chunking; if the full
+# run OOMs, split the samples across multiple sample_batched calls instead.
+SAMPLE_CHUNK = 64 if QUICK else 500
 SAMPLE_STEP_SIZE = 0.25 if QUICK else 0.01
 TARP_PAIRS = 2 if QUICK else 200
 TARP_POSTERIOR_SAMPLES = 8 if QUICK else 1_000
@@ -374,6 +378,9 @@ def main():
             f"final val loss {float(val_losses[-1]):.4f}")
     if RESTORE_MODEL:
         pipeline.restore_model()
+        # gensbi 0.4.0 only wraps models at the end of train(); wrap
+        # explicitly so the eval-only path (TRAIN_MODEL=False) can sample.
+        pipeline._wrap_model()
 
     evaluate(pipeline, ds, log)
     results_file.close()
