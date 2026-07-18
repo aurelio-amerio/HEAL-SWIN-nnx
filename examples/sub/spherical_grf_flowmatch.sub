@@ -2,14 +2,16 @@
 #
 #     condor_submit examples/sub/spherical_grf_flowmatch.sub
 #
-# `initialdir` makes the executable and condor_logs/ paths below resolve
-# relative to this file's own directory, so it can be submitted from anywhere.
-# Edit `repo_root` if your checkout lives elsewhere.
+# `initialdir` makes the condor_logs/ paths below resolve relative to this
+# file's own directory; the executable is given absolute (condor resolves a
+# relative executable against the submit-time cwd, not initialdir), so this
+# can be submitted from anywhere. Edit `repo_root` if your checkout lives
+# elsewhere.
 repo_root = /lustre/ific.uv.es/ml/ific088/github/HEAL-SWIN-nnx
 
 universe   = vanilla
 initialdir = $(repo_root)/examples/sub
-executable = run_spherical_grf_flowmatch.sh
+executable = $(repo_root)/examples/sub/run_spherical_grf_flowmatch.sh
 arguments  = "$(repo_root)"
 getenv     = True
 
