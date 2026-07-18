@@ -228,6 +228,27 @@ def prep_x(x_ring, ds):
     return jnp.asarray(x, dtype=jnp.float32)
 
 
+# gensbi 0.4.0 passes the experiment_id *string* as the orbax checkpoint
+# step, which orbax-checkpoint 0.12.1 rejects (TypeError during step
+# directory formatting). Checkpoints are already namespaced by
+# CHECKPOINT_DIR, so pin the step to 0 for both save and restore until
+# gensbi fixes this upstream.
+_orig_save_model = ConditionalPipeline.save_model
+_orig_restore_model = ConditionalPipeline.restore_model
+
+
+def _save_model_step0(self, experiment_id=None):
+    return _orig_save_model(self, 0)
+
+
+def _restore_model_step0(self, experiment_id=None):
+    return _orig_restore_model(self, 0)
+
+
+ConditionalPipeline.save_model = _save_model_step0
+ConditionalPipeline.restore_model = _restore_model_step0
+
+
 def make_training_config():
     cfg = ConditionalPipeline.get_default_training_config()
     cfg["nsteps"] = NSTEPS
