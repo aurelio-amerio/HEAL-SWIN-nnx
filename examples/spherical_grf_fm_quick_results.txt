@@ -1,0 +1,5 @@
+quick=True batch=8 nsteps=5 workers=0 nside=64 embed_dim=32 depths=(2, 2, 6, 2, 2) window=16 cond=48x512 flux=4d+4s heads=6 ids=('absolute', 'pos1d')
+data: HF aurelio-amerio/SBI-benchmarks-test/spherical_grf, Hub stats x_mean=-1.75098e-06 x_std=129.503 (3.7s)
+training: 2 steps in 39s, final train loss 4.3664, final val loss 5.2230
+obs 1: 64 samples in 8s | true [ 0.199 -2.85  -0.04 ] | flow mean [-0.055 -1.422  0.055] std [3.407 2.44  0.826] | ref mean [ 0.21  -2.887 -0.077] std [0.015 0.026 0.046]
+TARP: 2 pairs x 8 samples in 7s -> spherical_grf_fm_quick_tarp.png
