@@ -171,6 +171,63 @@ class SphericalGRFModel(nnx.Module):
                          guidance=guidance)
 
 
+def normalize_theta(theta):
+    return (np.asarray(theta) - np.asarray(THETA_MEAN)) / np.asarray(THETA_STD)
+
+
+def unnormalize_theta(theta):
+    return np.asarray(theta) * np.asarray(THETA_STD) + np.asarray(THETA_MEAN)
+
+
+def compute_x_stats(task, num_sims, seed):
+    """Global scalar x mean/std from a warmup batch of prior simulations.
+
+    The field is isotropic, so a single scalar pair suffices (matches the
+    published metadata's x stats axes (0, 1)). Ordering-independent, so the
+    RING simulator output can be used directly.
+    """
+    sim = task.get_simulator(jax.random.PRNGKey(seed))
+    kt, ks = jax.random.split(jax.random.PRNGKey(seed + 1))
+    theta = task.get_prior(kt, num_sims)
+    x = np.asarray(sim(ks, theta))
+    return float(x.mean()), float(x.std())
+
+
+def make_datasets():
+    """OnlineTaskDataset + train/val loaders of normalized NEST (theta, x) batches.
+
+    Offline swap (once the HF dataset is published): replace this body with
+    TaskDataset("spherical_grf", ordering="nest", normalize=True) and its
+    get_train_loader/get_val_loader — stats then come from Hub metadata.
+    """
+    task = get_task("spherical_grf")
+    x_mean, x_std = compute_x_stats(task, WARMUP_SIMS, SEED + 100)
+    stats = {
+        "theta_mean": list(THETA_MEAN), "theta_std": list(THETA_STD),
+        "x_mean": x_mean, "x_std": x_std,
+    }
+    ds = OnlineTaskDataset(
+        "spherical_grf", task_kwargs={}, ordering="nest",
+        normalize=True, stats=stats, seed=SEED,
+    )
+    train_loader = ds.get_online_train_loader(
+        BATCH_SIZE, seed=SEED, num_workers=NUM_WORKERS)
+    # The pipeline draws one fixed val batch; simulate it in-process.
+    val_loader = ds.get_online_train_loader(
+        VAL_BATCH_SIZE, seed=SEED + 1, num_workers=0)
+    return ds, stats, train_loader, val_loader
+
+
+def prep_x(x_ring, ds):
+    """Raw RING maps (B, NPIX) -> normalized NEST tokens (B, NPIX, 1).
+
+    Mirrors the training collate exactly: permute, tokenize, normalize.
+    """
+    x = np.asarray(x_ring)[:, ds._x_perm][..., None]
+    x = (x - ds.x_mean) / ds.x_std
+    return jnp.asarray(x, dtype=jnp.float32)
+
+
 if __name__ == "__main__" and os.environ.get("SMOKE") == "1":
     # Forward-shape smoke check: no data, no training; runs on CPU.
     model = SphericalGRFModel(rngs=nnx.Rngs(0))
