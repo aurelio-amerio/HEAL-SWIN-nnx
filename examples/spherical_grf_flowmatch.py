@@ -228,6 +228,67 @@ def prep_x(x_ring, ds):
     return jnp.asarray(x, dtype=jnp.float32)
 
 
+def make_training_config():
+    cfg = ConditionalPipeline.get_default_training_config()
+    cfg["nsteps"] = NSTEPS
+    cfg["experiment_id"] = EXPERIMENT_ID
+    cfg["checkpoint_dir"] = CHECKPOINT_DIR
+    if QUICK:
+        cfg["warmup_steps"] = 2
+        cfg["val_every"] = 2
+        cfg["decay_transition"] = 0
+    return cfg
+
+
+def make_pipeline(model, train_loader, val_loader):
+    return ConditionalPipeline(
+        model, train_loader, val_loader,
+        dim_obs=DIM_THETA, dim_cond=COND_TOKENS,
+        method=FlowMatchingMethod(),
+        ch_obs=1, ch_cond=COND_FEATURES,
+        id_embedding_strategy=ID_EMBEDDING,
+        training_config=make_training_config(),
+    )
+
+
+def main():
+    os.makedirs(IMGS_DIR, exist_ok=True)
+    results_file = open(RESULTS_FILE, "w")
+
+    def log(line):
+        print(line, flush=True)
+        results_file.write(line + "\n")
+        results_file.flush()
+
+    log(f"quick={QUICK} batch={BATCH_SIZE} nsteps={NSTEPS} workers={NUM_WORKERS} "
+        f"nside={NSIDE} embed_dim={EMBED_DIM} depths={DEPTHS} window={WINDOW_SIZE} "
+        f"cond={COND_TOKENS}x{COND_FEATURES} flux={FLUX_DEPTH}d+{FLUX_DEPTH_SINGLE}s "
+        f"heads={FLUX_NUM_HEADS} ids={ID_EMBEDDING}")
+
+    t0 = time.time()
+    ds, stats, train_loader, val_loader = make_datasets()
+    log(f"x stats from {WARMUP_SIMS} warmup sims: mean={stats['x_mean']:.6g} "
+        f"std={stats['x_std']:.6g} ({time.time() - t0:.1f}s)")
+
+    model = SphericalGRFModel(rngs=nnx.Rngs(SEED))
+    pipeline = make_pipeline(model, train_loader, val_loader)
+
+    if TRAIN_MODEL:
+        t0 = time.time()
+        losses, val_losses = pipeline.train(nnx.Rngs(SEED + 2), save_model=True)
+        log(f"training: {len(losses)} steps in {time.time() - t0:.0f}s, "
+            f"final train loss {float(losses[-1]):.4f}, "
+            f"final val loss {float(val_losses[-1]):.4f}")
+    if RESTORE_MODEL:
+        pipeline.restore_model()
+
+    # evaluation added in the next section
+    results_file.close()
+
+
+if __name__ == "__main__" and os.environ.get("SMOKE") != "1":
+    main()
+
 if __name__ == "__main__" and os.environ.get("SMOKE") == "1":
     # Forward-shape smoke check: no data, no training; runs on CPU.
     model = SphericalGRFModel(rngs=nnx.Rngs(0))
