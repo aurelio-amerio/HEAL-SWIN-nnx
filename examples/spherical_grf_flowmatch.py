@@ -3,7 +3,8 @@
 
 A HEALPix-native Swin encoder compresses each nside-64 spherical map to 48
 bottleneck tokens (nside 2, 512 features), which condition a gensbi Flux1
-flow-matching model over the 3-dim posterior (logA, n, alpha) of the
+flow-matching model, via spherical HEALPix RoPE ids (see COND_ID_KIND),
+over the 3-dim posterior (logA, n, alpha) of the
 sbibm-jax `spherical_grf` task. Training data streams from the published
 HF dataset (offline TaskDataset, NEST ordering, Hub normalization stats;
 first use downloads ~24 GB into the HF cache). TARP pairs are still
@@ -57,7 +58,7 @@ from heal_swin_nnx import HealSwinEncoder, HealSwinParams
 from gensbi.core import FlowMatchingMethod
 from gensbi.models import Flux1, Flux1Params
 from gensbi.recipes import ConditionalPipeline
-from gensbi.recipes.utils import init_ids_1d
+from gensbi.recipes.utils import init_ids_1d, init_ids_healpix, healpix_rope_theta
 from gensbi.utils.plotting import plot_marginals
 from gensbi.diagnostics import run_tarp, plot_tarp
 
@@ -89,8 +90,18 @@ COND_FEATURES = EMBED_DIM * 2 ** (len(DEPTHS) - 1)  # 512
 FLUX_DEPTH = 4                       # double-stream blocks
 FLUX_DEPTH_SINGLE = 4                # single-stream blocks
 FLUX_NUM_HEADS = 6
-FLUX_AXES_DIM = (64,)                # hidden_size = sum(axes_dim) * heads = 384
-ID_EMBEDDING = ("absolute", "pos1d") # learned theta-token ids, sinusoidal cond ids
+# Cond-stream positional ids: "healpix" = spherical RoPE on pixel-center
+# 3D coordinates (see gensbi init_ids_healpix); "pos1d" = 1D sinusoidal
+# ids over NEST order (baseline for A/B comparison).
+COND_ID_KIND = "healpix"
+NSIDE_BOTTLENECK = NSIDE // (2 * 2 ** (len(DEPTHS) - 1))  # patch /2, 4 mergings
+if COND_ID_KIND == "healpix":
+    ID_EMBEDDING = ("absolute", "rope")   # learned theta ids, spherical cond RoPE
+    FLUX_AXES_DIM = (22, 22, 20)          # (x, y, z); sum = 64 = hidden/heads
+else:
+    ID_EMBEDDING = ("absolute", "pos1d")  # learned theta ids, sinusoidal cond ids
+    FLUX_AXES_DIM = (64,)                 # hidden_size = sum(axes_dim) * heads = 384
+assert COND_TOKENS == 12 * NSIDE_BOTTLENECK**2
 
 # training / data
 SEED = 0
@@ -142,6 +153,8 @@ def make_flux_params(rngs: nnx.Rngs) -> Flux1Params:
         dim_obs=DIM_THETA,
         dim_cond=COND_TOKENS,
         axes_dim=list(FLUX_AXES_DIM),
+        theta=(healpix_rope_theta(NSIDE_BOTTLENECK)
+               if COND_ID_KIND == "healpix" else None),
         id_embedding_strategy=ID_EMBEDDING,
         param_dtype=jnp.float32,
     )
@@ -201,14 +214,28 @@ def make_training_config():
 
 
 def make_pipeline(model, train_loader, val_loader):
-    return ConditionalPipeline(
+    # ConditionalPipeline's own default-id builder (_resolve_embedding_ids)
+    # only knows 1D/2D strategies ("absolute", "pos1d", "rope1d", "pos2d",
+    # "rope2d"); it has no 3D HEALPix bucket, since building those ids needs
+    # NSIDE, not just dim_cond. Seed it with a throwaway 1D cond strategy so
+    # construction doesn't raise, then override cond_ids with the real
+    # spherical ids the model's RoPE actually uses. ID_EMBEDDING (passed to
+    # Flux1Params, see make_flux_params) is unaffected and is what controls
+    # the model's forward pass.
+    pipeline = ConditionalPipeline(
         model, train_loader, val_loader,
         dim_obs=DIM_THETA, dim_cond=COND_TOKENS,
         method=FlowMatchingMethod(),
         ch_obs=1, ch_cond=COND_FEATURES,
-        id_embedding_strategy=ID_EMBEDDING,
+        id_embedding_strategy=(
+            ID_EMBEDDING[0],
+            "absolute" if COND_ID_KIND == "healpix" else ID_EMBEDDING[1],
+        ),
         training_config=make_training_config(),
     )
+    if COND_ID_KIND == "healpix":
+        pipeline.cond_ids, _ = init_ids_healpix(NSIDE_BOTTLENECK)
+    return pipeline
 
 
 def evaluate(pipeline, ds, log):
@@ -296,7 +323,7 @@ def main():
     log(f"quick={QUICK} batch={BATCH_SIZE} nsteps={NSTEPS} workers={NUM_WORKERS} "
         f"nside={NSIDE} embed_dim={EMBED_DIM} depths={DEPTHS} window={WINDOW_SIZE} "
         f"cond={COND_TOKENS}x{COND_FEATURES} flux={FLUX_DEPTH}d+{FLUX_DEPTH_SINGLE}s "
-        f"heads={FLUX_NUM_HEADS} ids={ID_EMBEDDING}")
+        f"heads={FLUX_NUM_HEADS} ids={ID_EMBEDDING} cond_ids={COND_ID_KIND}")
 
     t0 = time.time()
     ds, train_loader, val_loader = make_datasets()
@@ -331,8 +358,11 @@ if __name__ == "__main__" and os.environ.get("SMOKE") == "1":
     model = SphericalGRFModel(rngs=nnx.Rngs(0))
     model.eval()
     B = 2
-    obs_ids, _ = init_ids_1d(DIM_THETA, 0)    # (1, 3, 2) — broadcast over batch
-    cond_ids, _ = init_ids_1d(COND_TOKENS, 1)  # (1, 48, 2)
+    obs_ids, _ = init_ids_1d(DIM_THETA, 0)  # (1, 3, 2) — broadcast over batch
+    if COND_ID_KIND == "healpix":
+        cond_ids, _ = init_ids_healpix(NSIDE_BOTTLENECK)  # (1, 48, 3) float32
+    else:
+        cond_ids, _ = init_ids_1d(COND_TOKENS, 1)  # (1, 48, 2)
     v = model(
         t=jnp.full((B,), 0.5),
         obs=jnp.zeros((B, DIM_THETA, 1)),

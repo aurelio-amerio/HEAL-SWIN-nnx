@@ -993,8 +993,8 @@ http = [
 
 [[package]]
 name = "gensbi"
-version = "0.4.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.4.1"
+source = { editable = "/lustre/ific.uv.es/ml/ific088/github/GenSBI" }
 dependencies = [
     { name = "blackjax" },
     { name = "corner" },
@@ -1003,6 +1003,7 @@ dependencies = [
     { name = "equinox" },
     { name = "flax" },
     { name = "grain" },
+    { name = "healpy" },
     { name = "jax" },
     { name = "kdepy" },
     { name = "matplotlib" },
@@ -1016,14 +1017,98 @@ dependencies = [
     { name = "seaborn" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b9/85/4dde90785c734ef396845d9132bd6b82f32a5ddaa8bd2e5a1feb6a6d3498/gensbi-0.4.0.tar.gz", hash = "sha256:92651c7048afa737a06c1b94bcafed75a23692a2731c4d4af9a668ea96f5f3f9", size = 183216, upload-time = "2026-07-09T10:56:23.495Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a0/bb/5ed9d7498beba349ff6a25dc8a1a092c3189b26e21a60540f4ddfa842d19/gensbi-0.4.0-py3-none-any.whl", hash = "sha256:ea7bd13a637bf070f9dfab27d8a280d12338af79951514fbe81cfd513e3df07d", size = 254291, upload-time = "2026-07-09T10:56:22.094Z" },
-]
 
 [package.optional-dependencies]
 examples = [
     { name = "sbibm-jax", extra = ["loader"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blackjax", specifier = ">=1.6" },
+    { name = "corner", specifier = ">=2.2.3" },
+    { name = "diffrax", specifier = ">=0.7.2" },
+    { name = "einops", specifier = ">=0.8.2" },
+    { name = "equinox", specifier = ">=0.13.8" },
+    { name = "flax", specifier = ">=0.12.7" },
+    { name = "grain", specifier = ">=0.2.18" },
+    { name = "healpy", specifier = ">=1.19.0" },
+    { name = "jax", specifier = ">=0.10.2,<0.12.0" },
+    { name = "jax", extras = ["cuda12"], marker = "extra == 'cuda12'", specifier = ">=0.10.2,<0.12.0" },
+    { name = "jax", extras = ["cuda13"], marker = "extra == 'cuda13'", specifier = ">=0.10.2,<0.12.0" },
+    { name = "jax", extras = ["tpu"], marker = "extra == 'tpu'", specifier = ">=0.10.2,<0.12.0" },
+    { name = "kdepy", specifier = ">=1.1.12" },
+    { name = "matplotlib", specifier = ">=3.11.0" },
+    { name = "numpy", specifier = ">=2.5.0" },
+    { name = "numpyro", specifier = ">=0.21.0" },
+    { name = "nvidia-cudnn-cu12", marker = "extra == 'cuda12'", specifier = "<9.11.0" },
+    { name = "optax", specifier = ">=0.2.8" },
+    { name = "orbax-checkpoint", specifier = ">=0.12.1" },
+    { name = "safetensors", extras = ["jax"], specifier = ">=0.8.0" },
+    { name = "sbibm-jax", extras = ["loader"], marker = "extra == 'examples'" },
+    { name = "scikit-learn", specifier = ">=1.9.0" },
+    { name = "scipy", specifier = ">=1.18.0" },
+    { name = "seaborn", specifier = ">=0.13.2" },
+    { name = "tqdm", specifier = ">=4.68.3" },
+]
+provides-extras = ["cuda12", "cuda13", "tpu", "examples"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "astroid", specifier = ">=4.1.2,<5" },
+    { name = "flake8" },
+    { name = "genbadge", extras = ["all"] },
+    { name = "junitparser" },
+    { name = "jupytext" },
+    { name = "linkify-it-py" },
+    { name = "myst-nb" },
+    { name = "notebook", specifier = ">=7.6.0" },
+    { name = "numpydoc" },
+    { name = "pandoc" },
+    { name = "pydata-sphinx-theme" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-env" },
+    { name = "pytest-mock" },
+    { name = "pytest-xdist" },
+    { name = "sphinx" },
+    { name = "sphinx-autoapi", specifier = ">=3.8.0" },
+    { name = "sphinx-copybutton" },
+    { name = "sphinx-design" },
+    { name = "sphinx-favicon", specifier = ">=1.1.0" },
+    { name = "sphinx-sitemap", specifier = "<2.7.0" },
+    { name = "sphinx-togglebutton" },
+    { name = "sphinxcontrib-mermaid" },
+    { name = "sphinxext-rediraffe" },
+]
+docs = [
+    { name = "astroid", specifier = ">=4.1.2,<5" },
+    { name = "jupytext" },
+    { name = "linkify-it-py" },
+    { name = "myst-nb" },
+    { name = "numpydoc" },
+    { name = "pandoc" },
+    { name = "pydata-sphinx-theme" },
+    { name = "sphinx" },
+    { name = "sphinx-autoapi", specifier = ">=3.8.0" },
+    { name = "sphinx-copybutton" },
+    { name = "sphinx-design" },
+    { name = "sphinx-favicon", specifier = ">=1.1.0" },
+    { name = "sphinx-sitemap", specifier = "<2.7.0" },
+    { name = "sphinx-togglebutton" },
+    { name = "sphinxcontrib-mermaid" },
+    { name = "sphinxext-rediraffe" },
+]
+lint = [{ name = "flake8" }]
+notebooks = [{ name = "notebook", specifier = ">=7.6.0" }]
+test = [
+    { name = "genbadge", extras = ["all"] },
+    { name = "junitparser" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-env" },
+    { name = "pytest-mock" },
+    { name = "pytest-xdist" },
 ]
 
 [[package]]
@@ -1107,7 +1192,7 @@ requires-dist = [
     { name = "datasets", marker = "extra == 'examples'", specifier = ">=5.0.0" },
     { name = "einops", specifier = ">=0.8.2" },
     { name = "flax", specifier = ">=0.12.7" },
-    { name = "gensbi", extras = ["examples"], marker = "extra == 'gensbi'" },
+    { name = "gensbi", extras = ["examples"], marker = "extra == 'gensbi'", editable = "/lustre/ific.uv.es/ml/ific088/github/GenSBI" },
     { name = "grain", marker = "extra == 'examples'", specifier = ">=0.2.18" },
     { name = "healpy", specifier = ">=1.19.0" },
     { name = "jax", specifier = ">=0.10.2" },
