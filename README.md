@@ -56,6 +56,13 @@ Public API: `HealSwin`, `HealSwinEncoder`, `HealSwinDecoder`, `HealSwinParams`,
 `nnx.Variable` subclass used for non-trainable index/mask state, excluded from
 `nnx.Param` filters).
 
+## Examples
+
+The spherical GRF simulation-based-inference example (HealSwin encoder +
+gensbi Flux1 flow matching) lives in
+[GenSBI-examples](https://github.com/aurelio-amerio/GenSBI-examples) under
+`examples/sbi-benchmarks/spherical_grf/`.
+
 ## Full sphere and partial coverage
 
 Models cover the full sphere by default (all 12 HEALPix base pixels). Experiments

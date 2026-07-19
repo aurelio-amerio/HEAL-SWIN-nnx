@@ -47,14 +47,3 @@ cuda12 = [
 cuda13 = [
     "jax[cuda13]>=0.10.2"
 ]
-
-
-gensbi = [
-    "gensbi[examples]",
-    "sbibm-jax[loader]",
-]
-
-[tool.uv.sources]
-sbibm-jax = { path = "/lhome/ific/a/aamerio/data/github/sbibm-jax", editable = true }
-# temporary: local gensbi working tree (healpix-rope branch) instead of PyPI
-gensbi = { path = "/lustre/ific.uv.es/ml/ific088/github/GenSBI", editable = true }
