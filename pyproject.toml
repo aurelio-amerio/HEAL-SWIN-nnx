@@ -16,6 +16,10 @@ dependencies = [
     "numpy>=2.5.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/aurelio-amerio/HEAL-SWIN-nnx"
+Issues = "https://github.com/aurelio-amerio/HEAL-SWIN-nnx/issues"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-n 2"

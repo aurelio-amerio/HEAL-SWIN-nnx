@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/gensbi
+      url: https://pypi.org/p/heal-swin-nnx
     permissions:
       id-token: write
       contents: read
