@@ -239,3 +239,20 @@ def test_healswin_param_dtype_propagates(pos_embed):
     y = model(x)
     assert y.dtype == jnp.bfloat16 and y.shape == (2, p.npix, 5)
     assert bool(jnp.isfinite(y).all())
+
+
+@pytest.mark.parametrize("pos_embed", ["rope_mixed", "rope_axial", "rel_bias"])
+def test_flat_param_dtype_propagates(pos_embed):
+    model, p = tiny_flat(param_dtype="bfloat16", pos_embed=pos_embed)
+    model.eval()
+    for path, dtype in _param_dtypes(model).items():
+        expected = jnp.float32 if "rope_freqs" in path else jnp.bfloat16
+        assert dtype == expected, path
+
+    ref, _ = tiny_flat(pos_embed=pos_embed)        # buffers ignore param_dtype
+    assert _buffer_dtypes(model) == _buffer_dtypes(ref)
+
+    x = jax.random.normal(jax.random.key(0), (2, *p.img_size, 2))
+    y = model(x)
+    assert y.dtype == jnp.bfloat16 and y.shape == (2, p.img_size[0], p.img_size[1], 3)
+    assert bool(jnp.isfinite(y).all())
