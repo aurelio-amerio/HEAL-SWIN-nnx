@@ -305,22 +305,19 @@ def test_bf16_drift_within_calibrated_band(name):
     m32.eval(); m16.eval()
     errs = [_rel_err(m32(x), m16(x)) for x in (x_of(p, s) for s in range(10))]
     bound = DRIFT_BOUND[name]
-    # upper lock: mixed-precision computation quality regressed (dropped cast,
-    # removed island, changed accumulation). Multiplier left at the brief's
-    # default *3: RED-verified for the lower canary (see below), but the
-    # prescribed upper-bound probe for healswin (hard-coding the softmax
-    # island exit `.astype(self.dtype)` -> `.astype(jnp.bfloat16)`, which also
-    # corrupts the fp32 reference) measured max=0.392 < the locked bound
-    # (0.416) at the same worst seed -- it does NOT trip this assertion at
-    # any multiplier > 1, since the corrupted run is *below* the bound it
-    # would need to exceed. Root cause: with embed_dim=16 these fixtures'
-    # LayerNorm reductions are too small for fp32-vs-bf16 accumulation to
-    # matter, and the extra bf16 rounding this probe adds to the reference's
-    # softmax happens to anti-correlate with existing bf16 model noise at the
-    # worst seed rather than add to it. No multiplier change was made because
-    # none exists that both fails this probe and keeps this test passing
-    # uncorrupted; see task-6-report.md for the full investigation and a
-    # recommended alternative upper-bound probe.
+    # upper lock: gross mixed-precision regression (outputs decorrelating from
+    # the fp32 reference). NOT RED-verifiable by single-site probes at this
+    # fixture scale — two were tried and neither trips it: (1) the plan's
+    # softmax-exit corruption (`.astype(jnp.bfloat16)`, corrupts both models
+    # symmetrically) measured max=0.392 < bound; (2) removing the block-norm
+    # fp32 islands from the bf16 model only (`dtype=params.dtype` on
+    # norm1/norm2) left the drift BIT-identical, because flax LayerNorm
+    # computes its mean/var statistics in fp32 internally regardless of
+    # `dtype`, and the post-norm residual cast rounds the output to bf16
+    # either way. At embed_dim=16 every realistic regression lands below the
+    # amplified-rounding noise floor (~0.4), so this assertion only catches
+    # catastrophic breakage; per-cast leak protection is the RED-verified spy
+    # tests above. See task-6-report.md for the full investigation.
     assert max(errs) < bound * 3, (name, errs)
     # lower canary: near-zero drift means bf16 compute silently stopped
     # happening — the knob is dead while every tolerance test still passes
