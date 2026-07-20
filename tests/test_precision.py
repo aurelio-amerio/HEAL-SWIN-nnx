@@ -136,3 +136,68 @@ def test_healswin_softmax_island_is_fp32(monkeypatch):
     model.eval()
     model(_smooth_input(jax.random.key(0), p.npix, 3))
     assert seen and all(dt == jnp.float32 for dt in seen), seen
+
+
+# --- SwinUnet ---------------------------------------------------------------
+
+from heal_swin_nnx import SwinParams, SwinUnet
+from heal_swin_nnx.models.swin import SwinBlock
+
+
+def make_flat(**over):
+    kw = dict(img_size=(32, 64), in_channels=2, out_channels=3, embed_dim=16,
+              depths=(2, 2), num_heads=(2, 4), drop_path_rate=0.0)
+    kw.update(over)
+    p = SwinParams(**kw)
+    return SwinUnet(p, rngs=nnx.Rngs(0)), p
+
+
+def _smooth_input_2d(key, img_size, channels, batch=2):
+    H, W = img_size
+    flat = _smooth_input(key, H * W, channels, batch=batch)
+    return flat.reshape(batch, H, W, channels)
+
+
+def test_flat_master_weights_fp32_under_bf16_compute():
+    model, _ = make_flat(dtype="bfloat16")
+    for path, v in nnx.to_flat_state(nnx.state(model, nnx.Param)):
+        assert v[...].dtype == jnp.float32, path
+
+
+def test_flat_output_and_grads_fp32():
+    model, p = make_flat(dtype="bfloat16")
+    model.eval()
+    x = _smooth_input_2d(jax.random.key(0), p.img_size, 2)
+    y = model(x)
+    assert y.dtype == jnp.float32 and bool(jnp.isfinite(y).all())
+    tokens, _ = model.encoder(x)
+    assert tokens.dtype == jnp.float32
+    grads = nnx.grad(lambda m: jnp.mean(m(x) ** 2))(model)
+    for path, g in nnx.to_flat_state(grads):
+        joined = "/".join(str(q) for q in path)
+        assert g[...].dtype == jnp.float32, joined
+
+
+@pytest.mark.parametrize("patch_embed_norm", [False, True])
+def test_flat_stream_is_bf16_inside_blocks(monkeypatch, patch_embed_norm):
+    seen = _block_entry_spy(monkeypatch, SwinBlock)
+    model, p = make_flat(dtype="bfloat16", patch_embed_norm=patch_embed_norm)
+    model.eval()
+    model(_smooth_input_2d(jax.random.key(0), p.img_size, 2))
+    assert len(seen) >= 6
+    assert all(dt == jnp.bfloat16 for dt in seen), seen
+
+
+def test_flat_softmax_island_is_fp32(monkeypatch):
+    seen = []
+    orig = jax.nn.softmax
+
+    def spy(x, axis=-1, **kw):
+        seen.append(x.dtype)
+        return orig(x, axis=axis, **kw)
+
+    monkeypatch.setattr(jax.nn, "softmax", spy)
+    model, p = make_flat(dtype="bfloat16")
+    model.eval()
+    model(_smooth_input_2d(jax.random.key(0), p.img_size, 2))
+    assert seen and all(dt == jnp.float32 for dt in seen), seen

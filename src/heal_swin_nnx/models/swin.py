@@ -152,6 +152,7 @@ class WindowAttention(nnx.Module):
         self.window_size = tuple(window_size)
         self.num_heads = num_heads
         self.pos_embed = params.pos_embed
+        self.dtype = params.dtype
         head_dim = dim // num_heads
         self.logit_scale = nnx.Param(
             jnp.full((num_heads, 1, 1), jnp.log(10.0), dtype=params.param_dtype))
@@ -174,10 +175,10 @@ class WindowAttention(nnx.Module):
                 self.rope_table = Buffer(rope_rotation_table(freqs, coords[0], coords[1]))
 
         self.qkv = nnx.Linear(dim, dim * 3, use_bias=params.qkv_bias,
-                              kernel_init=TRUNC_NORMAL, param_dtype=params.param_dtype,
-                              rngs=rngs)
+                              kernel_init=TRUNC_NORMAL, dtype=params.dtype,
+                              param_dtype=params.param_dtype, rngs=rngs)
         self.attn_drop = nnx.Dropout(params.attn_drop_rate, rngs=rngs)
-        self.proj = nnx.Linear(dim, dim, kernel_init=TRUNC_NORMAL,
+        self.proj = nnx.Linear(dim, dim, kernel_init=TRUNC_NORMAL, dtype=params.dtype,
                                param_dtype=params.param_dtype, rngs=rngs)
         self.proj_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
 
@@ -195,22 +196,28 @@ class WindowAttention(nnx.Module):
             q, k = apply_rope(q, k, table)
         elif self.pos_embed == "rope_axial":
             q, k = apply_rope(q, k, self.rope_table[...])
-        attn = q @ k.swapaxes(-2, -1)
-        logit_scale = jnp.exp(jnp.minimum(self.logit_scale[...], jnp.log(1.0 / 0.01)))
+        # fp32 logits island: bf16 operands with fp32 accumulation (free on
+        # tensor cores), and scale/bias/mask/softmax stay fp32. Cosine logits
+        # are bounded (|logit| <= 100), so this is about bf16's 8-bit mantissa
+        # resolution near the softmax operating point, not overflow.
+        attn = jnp.einsum("bhnd,bhmd->bhnm", q, k,
+                          preferred_element_type=jnp.float32)
+        logit_scale = jnp.exp(jnp.minimum(
+            self.logit_scale[...].astype(jnp.float32), jnp.log(1.0 / 0.01)))
         attn = attn * logit_scale
 
         if self.pos_embed == "rel_bias":
             ws_area = self.window_size[0] * self.window_size[1]
             bias = self.relative_position_bias_table[...][
                 self.relative_position_index[...].reshape(-1)].reshape(ws_area, ws_area, -1)
-            attn = attn + bias.transpose(2, 0, 1)[None]
+            attn = attn + bias.transpose(2, 0, 1)[None].astype(jnp.float32)
 
         if mask is not None:
             nW = mask.shape[0]
             attn = (attn.reshape(B_ // nW, nW, self.num_heads, N, N)
                     + mask.astype(attn.dtype)[None, :, None])
             attn = attn.reshape(-1, self.num_heads, N, N)
-        attn = jax.nn.softmax(attn, axis=-1)
+        attn = jax.nn.softmax(attn, axis=-1).astype(self.dtype)  # island exit
         attn = self.attn_drop(attn)
         x = (attn @ v).swapaxes(1, 2).reshape(B_, N, C)
         return self.proj_drop(self.proj(x))
@@ -228,14 +235,15 @@ class SwinBlock(nnx.Module):
             self.window_size = self.input_resolution
         self.shift_size = shift_size
 
-        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=params.param_dtype,
-                                   rngs=rngs)
+        self.dtype = params.dtype
+        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                   param_dtype=params.param_dtype, rngs=rngs)
         self.attn = WindowAttention(params, dim, num_heads, self.window_size, rngs=rngs)
         self.drop_path = DropPath(drop_path, rngs=rngs) if drop_path > 0.0 else Identity()
-        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=params.param_dtype,
-                                   rngs=rngs)
+        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                   param_dtype=params.param_dtype, rngs=rngs)
         self.mlp = Mlp(dim, int(dim * params.mlp_ratio), drop=params.drop_rate,
-                       param_dtype=params.param_dtype, rngs=rngs)
+                       dtype=params.dtype, param_dtype=params.param_dtype, rngs=rngs)
 
         if params.use_masking and (shift_size[0] > 0 or shift_size[1] > 0):
             self.attn_mask = Buffer(jnp.asarray(flat_shift_mask(
@@ -269,18 +277,22 @@ class SwinBlock(nnx.Module):
             x = shifted_x
         x = x.reshape(B, H * W, C)
 
-        x = shortcut + self.drop_path(self.norm1(x))
-        return x + self.drop_path(self.norm2(self.mlp(x)))
+        # fp32 norm islands exit here: cast BEFORE the residual add — adds do
+        # not self-heal, one fp32 summand re-promotes the whole downstream stream
+        x = shortcut + self.drop_path(self.norm1(x).astype(self.dtype))
+        return x + self.drop_path(self.norm2(self.mlp(x)).astype(self.dtype))
 
 
 class PatchMerging(nnx.Module):
-    def __init__(self, input_resolution, dim, param_dtype="float32", *, rngs):
+    def __init__(self, input_resolution, dim, param_dtype="float32", dtype="float32",
+                 *, rngs):
         self.input_resolution = tuple(input_resolution)
         self.reduction = nnx.Linear(4 * dim, 2 * dim, use_bias=False,
-                                    kernel_init=TRUNC_NORMAL, param_dtype=param_dtype,
-                                    rngs=rngs)
-        self.norm = nnx.LayerNorm(4 * dim, epsilon=LN_EPS, param_dtype=param_dtype,
-                                  rngs=rngs)
+                                    kernel_init=TRUNC_NORMAL, dtype=dtype,
+                                    param_dtype=param_dtype, rngs=rngs)
+        # fp32 island; output feeds `reduction` on the same line (self-healing)
+        self.norm = nnx.LayerNorm(4 * dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                  param_dtype=param_dtype, rngs=rngs)
 
     def __call__(self, x):
         H, W = self.input_resolution
@@ -296,12 +308,14 @@ class PatchMerging(nnx.Module):
 
 
 class PatchExpand(nnx.Module):
-    def __init__(self, input_resolution, dim, dim_scale=2, param_dtype="float32", *, rngs):
+    def __init__(self, input_resolution, dim, dim_scale=2, param_dtype="float32",
+                 dtype="float32", *, rngs):
         self.input_resolution = tuple(input_resolution)
+        self.dtype = dtype
         self.expand = (nnx.Linear(dim, 2 * dim, use_bias=False, kernel_init=TRUNC_NORMAL,
-                                  param_dtype=param_dtype, rngs=rngs)
+                                  dtype=dtype, param_dtype=param_dtype, rngs=rngs)
                        if dim_scale == 2 else Identity())
-        self.norm = nnx.LayerNorm(dim // dim_scale, epsilon=LN_EPS,
+        self.norm = nnx.LayerNorm(dim // dim_scale, epsilon=LN_EPS, dtype=jnp.float32,
                                   param_dtype=param_dtype, rngs=rngs)
 
     def __call__(self, x):
@@ -311,19 +325,23 @@ class PatchExpand(nnx.Module):
         assert L == H * W, "input feature has wrong size"
         x = x.reshape(B, H, W, C)
         x = rearrange(x, "b h w (p1 p2 c) -> b (h p1) (w p2) c", p1=2, p2=2, c=C // 4)
-        return self.norm(x.reshape(B, -1, C // 4))
+        # fp32 norm island exits here: consumers (stage residuals, skip concat)
+        # do not self-heal, so emit the compute dtype
+        return self.norm(x.reshape(B, -1, C // 4)).astype(self.dtype)
 
 
 class FinalPatchExpand(nnx.Module):
-    def __init__(self, input_resolution, patch_size, dim, param_dtype="float32", *, rngs):
+    def __init__(self, input_resolution, patch_size, dim, param_dtype="float32",
+                 dtype="float32", *, rngs):
         self.input_resolution = tuple(input_resolution)
         self.patch_size = tuple(patch_size)
         self.output_dim = dim
         self.expand = nnx.Linear(dim, self.patch_size[0] * self.patch_size[1] * dim,
-                                 use_bias=False, kernel_init=TRUNC_NORMAL,
+                                 use_bias=False, kernel_init=TRUNC_NORMAL, dtype=dtype,
                                  param_dtype=param_dtype, rngs=rngs)
-        self.norm = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=param_dtype,
-                                  rngs=rngs)
+        # fp32 island with NO exit cast: sole consumer is the fp32 output conv
+        self.norm = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                  param_dtype=param_dtype, rngs=rngs)
 
     def __call__(self, x):
         H, W = self.input_resolution
@@ -340,12 +358,14 @@ class FinalPatchExpand(nnx.Module):
 class PatchEmbed(nnx.Module):
     def __init__(self, params, *, rngs):
         self.img_size = params.img_size
+        self.dtype = params.dtype
         self.num_patches = params.patches_resolution[0] * params.patches_resolution[1]
         self.proj = nnx.Conv(params.in_channels, params.embed_dim,
                              kernel_size=tuple(params.patch_size),
                              strides=tuple(params.patch_size), padding="VALID",
-                             param_dtype=params.param_dtype, rngs=rngs)
-        self.norm = (nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS,
+                             dtype=params.dtype, param_dtype=params.param_dtype,
+                             rngs=rngs)
+        self.norm = (nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, dtype=jnp.float32,
                                    param_dtype=params.param_dtype, rngs=rngs)
                      if params.patch_embed_norm else None)
 
@@ -355,7 +375,8 @@ class PatchEmbed(nnx.Module):
         x = self.proj(x)                   # (B, Ph, Pw, embed_dim)
         x = x.reshape(B, -1, x.shape[-1])  # row-major flatten
         if self.norm is not None:
-            x = self.norm(x)
+            # fp32 norm island exits straight into stage residuals: emit compute dtype
+            x = self.norm(x).astype(self.dtype)
         return x
 
 
@@ -371,7 +392,7 @@ class EncoderStage(nnx.Module):
         self.use_checkpoint = params.use_checkpoint
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
                                             num_heads, drop_path, rngs))
-        self.downsample = (PatchMerging(input_resolution, dim=dim,
+        self.downsample = (PatchMerging(input_resolution, dim=dim, dtype=params.dtype,
                                         param_dtype=params.param_dtype, rngs=rngs)
                            if downsample else None)
 
@@ -390,7 +411,8 @@ class DecoderStage(nnx.Module):
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
                                             num_heads, drop_path, rngs))
         self.upsample = (PatchExpand(input_resolution, dim=dim, dim_scale=2,
-                                     param_dtype=params.param_dtype, rngs=rngs)
+                                     dtype=params.dtype, param_dtype=params.param_dtype,
+                                     rngs=rngs)
                          if upsample else None)
 
     def __call__(self, x):
@@ -424,11 +446,11 @@ class SwinEncoder(nnx.Module):
                 drop_path=dpr[sum(params.depths[:i]):sum(params.depths[:i + 1])],
                 downsample=i < self.num_layers - 1, rngs=rngs))
         self.layers = nnx.List(layers)
-        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS,
+        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS, dtype=jnp.float32,
                                   param_dtype=params.param_dtype, rngs=rngs)
 
     def __call__(self, x):
-        x = jnp.asarray(x, dtype=self.params.param_dtype)
+        x = jnp.asarray(x, dtype=jnp.float32)
         x = self.patch_embed(x)
         x = self.pos_drop(x)
         skips = []
@@ -451,11 +473,12 @@ class SwinDecoder(nnx.Module):
             dim = int(params.embed_dim * 2 ** down_idx)
             res = (pr[0] // 2 ** down_idx, pr[1] // 2 ** down_idx)
             concat_back_dim.append(
-                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL,
+                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL, dtype=params.dtype,
                            param_dtype=params.param_dtype, rngs=rngs)
                 if i_layer > 0 else Identity())
             if i_layer == 0:
                 layers_up.append(PatchExpand(res, dim=dim, dim_scale=2,
+                                             dtype=params.dtype,
                                              param_dtype=params.param_dtype, rngs=rngs))
             else:
                 layers_up.append(DecoderStage(
@@ -466,13 +489,15 @@ class SwinDecoder(nnx.Module):
                     upsample=i_layer < self.num_layers - 1, rngs=rngs))
         self.layers_up = nnx.List(layers_up)
         self.concat_back_dim = nnx.List(concat_back_dim)
-        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS,
+        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, dtype=jnp.float32,
                                      param_dtype=params.param_dtype, rngs=rngs)
         self.up = FinalPatchExpand(pr, patch_size=params.patch_size,
-                                   dim=params.embed_dim,
+                                   dim=params.embed_dim, dtype=params.dtype,
                                    param_dtype=params.param_dtype, rngs=rngs)
+        # emit-fp32 endpoint: constructed fp32 (never a post-hoc astype)
         self.output = nnx.Conv(params.embed_dim, params.out_channels, kernel_size=(1, 1),
-                               use_bias=False, param_dtype=params.param_dtype, rngs=rngs)
+                               use_bias=False, dtype=jnp.float32,
+                               param_dtype=params.param_dtype, rngs=rngs)
 
     def __call__(self, x, skips):
         for inx, layer_up in enumerate(self.layers_up):
