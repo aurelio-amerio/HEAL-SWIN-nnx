@@ -151,6 +151,7 @@ class WindowAttention(nnx.Module):
     def __init__(self, params, dim, num_heads, window_size, *, rngs):
         self.num_heads = num_heads
         self.pos_embed = params.pos_embed
+        self.dtype = params.dtype
         head_dim = dim // num_heads
         self.logit_scale = nnx.Param(
             jnp.full((num_heads, 1, 1), jnp.log(10.0), dtype=params.param_dtype))
@@ -175,10 +176,10 @@ class WindowAttention(nnx.Module):
                 self.rope_table = Buffer(rope_rotation_table(freqs, coords[0], coords[1]))
 
         self.qkv = nnx.Linear(dim, dim * 3, use_bias=params.qkv_bias,
-                              kernel_init=TRUNC_NORMAL, param_dtype=params.param_dtype,
-                              rngs=rngs)
+                              kernel_init=TRUNC_NORMAL, dtype=params.dtype,
+                              param_dtype=params.param_dtype, rngs=rngs)
         self.attn_drop = nnx.Dropout(params.attn_drop_rate, rngs=rngs)
-        self.proj = nnx.Linear(dim, dim, kernel_init=TRUNC_NORMAL,
+        self.proj = nnx.Linear(dim, dim, kernel_init=TRUNC_NORMAL, dtype=params.dtype,
                                param_dtype=params.param_dtype, rngs=rngs)
         self.proj_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
 
@@ -196,20 +197,26 @@ class WindowAttention(nnx.Module):
             q, k = apply_rope(q, k, table)
         elif self.pos_embed == "rope_axial":
             q, k = apply_rope(q, k, self.rope_table[...])
-        attn = q @ k.swapaxes(-2, -1)
-        logit_scale = jnp.exp(jnp.minimum(self.logit_scale[...], jnp.log(1.0 / 0.01)))
+        # fp32 logits island: bf16 operands with fp32 accumulation (free on
+        # tensor cores), and scale/bias/mask/softmax stay fp32. Cosine logits
+        # are bounded (|logit| <= 100), so this is about bf16's 8-bit mantissa
+        # resolution near the softmax operating point, not overflow.
+        attn = jnp.einsum("bhnd,bhmd->bhnm", q, k,
+                          preferred_element_type=jnp.float32)
+        logit_scale = jnp.exp(jnp.minimum(
+            self.logit_scale[...].astype(jnp.float32), jnp.log(1.0 / 0.01)))
         attn = attn * logit_scale
 
         if self.pos_embed == "rel_bias":
             bias = self.relative_position_bias_table[...][self.relative_position_index[...]]
-            attn = attn + bias.transpose(2, 0, 1)[None]
+            attn = attn + bias.transpose(2, 0, 1)[None].astype(jnp.float32)
 
         if mask is not None:
             nW = mask.shape[0]
             attn = (attn.reshape(B_ // nW, nW, self.num_heads, N, N)
                     + mask.astype(attn.dtype)[None, :, None])
             attn = attn.reshape(-1, self.num_heads, N, N)
-        attn = jax.nn.softmax(attn, axis=-1)
+        attn = jax.nn.softmax(attn, axis=-1).astype(self.dtype)  # island exit
         attn = self.attn_drop(attn)
 
         x = (attn @ v).swapaxes(1, 2).reshape(B_, N, C)
@@ -223,14 +230,15 @@ class HealSwinBlock(nnx.Module):
         shift_size = params.shift_size if (shifted
                                            and input_resolution > params.window_size) else 0
 
-        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=params.param_dtype,
-                                   rngs=rngs)
+        self.dtype = params.dtype
+        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                   param_dtype=params.param_dtype, rngs=rngs)
         self.attn = WindowAttention(params, dim, num_heads, self.window_size, rngs=rngs)
         self.drop_path = DropPath(drop_path, rngs=rngs) if drop_path > 0.0 else Identity()
-        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=params.param_dtype,
-                                   rngs=rngs)
+        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                   param_dtype=params.param_dtype, rngs=rngs)
         self.mlp = Mlp(dim, int(dim * params.mlp_ratio), drop=params.drop_rate,
-                       param_dtype=params.param_dtype, rngs=rngs)
+                       dtype=params.dtype, param_dtype=params.param_dtype, rngs=rngs)
 
         nside = math.isqrt(input_resolution // len(params.base_pixels))
         assert nside * nside * len(params.base_pixels) == input_resolution, \
@@ -265,8 +273,10 @@ class HealSwinBlock(nnx.Module):
         shifted_x = window_reverse(attn_windows, self.window_size, self.input_resolution)
         x = self.shifter.shift_back(shifted_x)
 
-        x = shortcut + self.drop_path(self.norm1(x))
-        return x + self.drop_path(self.norm2(self.mlp(x)))
+        # fp32 norm islands exit here: cast BEFORE the residual add — adds do
+        # not self-heal, one fp32 summand re-promotes the whole downstream stream
+        x = shortcut + self.drop_path(self.norm1(x).astype(self.dtype))
+        return x + self.drop_path(self.norm2(self.mlp(x)).astype(self.dtype))
 
 
 def _make_blocks(params, dim, input_resolution, depth, num_heads, drop_path, rngs):
@@ -281,7 +291,8 @@ class EncoderStage(nnx.Module):
         self.use_checkpoint = params.use_checkpoint
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
                                             num_heads, drop_path, rngs))
-        self.downsample = (PatchMerging(dim=dim, param_dtype=params.param_dtype,
+        self.downsample = (PatchMerging(dim=dim, dtype=params.dtype,
+                                        param_dtype=params.param_dtype,
                                         rngs=rngs) if downsample else None)
 
     def __call__(self, x):
@@ -298,7 +309,7 @@ class DecoderStage(nnx.Module):
         self.use_checkpoint = params.use_checkpoint
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
                                             num_heads, drop_path, rngs))
-        self.upsample = (PatchExpand(dim=dim, dim_scale=2,
+        self.upsample = (PatchExpand(dim=dim, dim_scale=2, dtype=params.dtype,
                                      param_dtype=params.param_dtype, rngs=rngs)
                          if upsample else None)
 
@@ -324,6 +335,7 @@ class HealSwinEncoder(nnx.Module):
         self.num_features = int(params.embed_dim * 2 ** (self.num_layers - 1))
         self.patch_embed = PatchEmbed(params.npix, params.patch_size, params.in_channels,
                                       params.embed_dim, params.patch_embed_norm,
+                                      dtype=params.dtype,
                                       param_dtype=params.param_dtype, rngs=rngs)
         self.pos_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
 
@@ -338,11 +350,11 @@ class HealSwinEncoder(nnx.Module):
                 drop_path=dpr[sum(params.depths[:i]):sum(params.depths[:i + 1])],
                 downsample=i < self.num_layers - 1, rngs=rngs))
         self.layers = nnx.List(layers)
-        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS,
+        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS, dtype=jnp.float32,
                                   param_dtype=params.param_dtype, rngs=rngs)
 
     def __call__(self, x):
-        x = jnp.asarray(x, dtype=self.params.param_dtype)
+        x = jnp.asarray(x, dtype=jnp.float32)
         x = self.patch_embed(x)
         x = self.pos_drop(x)
         skips = []
@@ -365,11 +377,11 @@ class HealSwinDecoder(nnx.Module):
             down_idx = self.num_layers - 1 - i_layer
             dim = int(params.embed_dim * 2 ** down_idx)
             concat_back_dim.append(
-                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL,
+                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL, dtype=params.dtype,
                            param_dtype=params.param_dtype, rngs=rngs)
                 if i_layer > 0 else Identity())
             if i_layer == 0:
-                layers_up.append(PatchExpand(dim=dim, dim_scale=2,
+                layers_up.append(PatchExpand(dim=dim, dim_scale=2, dtype=params.dtype,
                                              param_dtype=params.param_dtype, rngs=rngs))
             else:
                 layers_up.append(DecoderStage(
@@ -380,12 +392,15 @@ class HealSwinDecoder(nnx.Module):
                     upsample=down_idx > 0, rngs=rngs))
         self.layers_up = nnx.List(layers_up)
         self.concat_back_dim = nnx.List(concat_back_dim)
-        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS,
+        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, dtype=jnp.float32,
                                      param_dtype=params.param_dtype, rngs=rngs)
         self.up = FinalPatchExpand(patch_size=params.patch_size, dim=params.embed_dim,
+                                   dtype=params.dtype,
                                    param_dtype=params.param_dtype, rngs=rngs)
+        # emit-fp32 endpoint: constructed fp32 (never a post-hoc astype)
         self.output = nnx.Conv(params.embed_dim, params.out_channels, kernel_size=(1,),
-                               use_bias=False, param_dtype=params.param_dtype, rngs=rngs)
+                               use_bias=False, dtype=jnp.float32,
+                               param_dtype=params.param_dtype, rngs=rngs)
 
     def __call__(self, x, skips):
         for inx, layer_up in enumerate(self.layers_up):
