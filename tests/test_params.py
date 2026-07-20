@@ -1,6 +1,7 @@
 import dataclasses
 import json
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -245,7 +246,16 @@ def test_param_dtype_defaults_and_canonicalization(mk):
 
 
 @pytest.mark.parametrize("mk", PARAMS_FACTORIES)
-@pytest.mark.parametrize("bad", ["int32", "bool", "not_a_dtype", 7])
+@pytest.mark.parametrize("bad", ["int32", "bool", "not_a_dtype", 7, None])
 def test_param_dtype_rejects_non_floats(mk, bad):
     with pytest.raises(ValueError):
         mk(param_dtype=bad)
+
+
+@pytest.mark.parametrize("mk", PARAMS_FACTORIES)
+def test_param_dtype_rejects_float64_without_x64(mk):
+    # test env runs with jax_enable_x64 disabled; float64 params would silently
+    # be created as float32 arrays, so this must raise rather than pass through.
+    assert not jax.config.jax_enable_x64
+    with pytest.raises(ValueError):
+        mk(param_dtype="float64")

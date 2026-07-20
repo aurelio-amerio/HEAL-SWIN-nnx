@@ -29,6 +29,10 @@ def canonical_float_dtype(value):
     Params dataclasses store dtypes as canonical strings so
     ``json.dumps(dataclasses.asdict(params))`` keeps working; every jnp/nnx
     API accepts the string form. Floating dtypes only."""
+    if value is None:
+        # numpy resolves dtype(None) to float64 (its legacy default dtype);
+        # that's never an intentional param_dtype choice.
+        raise ValueError("param_dtype must be a floating DTypeLike, got %r" % (value,))
     try:
         dt = jnp.dtype(value)
     except TypeError as e:
@@ -36,6 +40,11 @@ def canonical_float_dtype(value):
                          % (value,)) from e
     if not jnp.issubdtype(dt, jnp.floating):
         raise ValueError("param_dtype must be a floating dtype, got %r" % (value,))
+    if dt.name == "float64" and not jax.config.jax_enable_x64:
+        raise ValueError(
+            "param_dtype='float64' requires enabling jax_enable_x64 before "
+            "constructing params (jax.config.update('jax_enable_x64', True)); "
+            "otherwise jnp array creation silently yields float32, got %r" % (value,))
     return dt.name
 
 

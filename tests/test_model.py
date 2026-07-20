@@ -241,6 +241,22 @@ def test_healswin_param_dtype_propagates(pos_embed):
     assert bool(jnp.isfinite(y).all())
 
 
+def test_healswin_param_dtype_grads_match_param_dtypes():
+    model, p = tiny_hp(param_dtype="bfloat16")   # rope_mixed default
+    model.eval()
+    x = jax.random.normal(jax.random.key(0), (1, p.npix, 3))
+
+    def loss_fn(m):
+        return jnp.sum(m(x).astype(jnp.float32) ** 2)
+
+    grads = nnx.grad(loss_fn)(model)
+    for path, g in nnx.to_flat_state(grads):
+        joined = "/".join(str(q) for q in path)
+        expected = jnp.float32 if "rope_freqs" in joined else jnp.bfloat16
+        assert g[...].dtype == expected, joined
+        assert bool(jnp.isfinite(g[...]).all()), joined
+
+
 @pytest.mark.parametrize("pos_embed", ["rope_mixed", "rope_axial", "rel_bias"])
 def test_flat_param_dtype_propagates(pos_embed):
     model, p = tiny_flat(param_dtype="bfloat16", pos_embed=pos_embed)
