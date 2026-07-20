@@ -158,6 +158,20 @@ def _smooth_input_2d(key, img_size, channels, batch=2):
     return flat.reshape(batch, H, W, channels)
 
 
+def test_swin_local_blocks_emit_compute_dtype():
+    """Block-level emit-dtype guard for swin.py's OWN local patch blocks
+    (separate classes from layers.py's shared ones — mirrors
+    test_shared_blocks_emit_compute_dtype above)."""
+    from heal_swin_nnx.models.swin import FinalPatchExpand, PatchExpand, PatchMerging
+    rngs = nnx.Rngs(0)
+    x = jnp.ones((2, 16, 8), jnp.bfloat16)   # 4x4 resolution, C=8
+    assert PatchMerging((4, 4), 8, dtype="bfloat16", rngs=rngs)(x).dtype == jnp.bfloat16
+    assert PatchExpand((4, 4), 8, dtype="bfloat16", rngs=rngs)(x).dtype == jnp.bfloat16
+    # FinalPatchExpand's sole consumer is the fp32 output conv: deliberate fp32 tail
+    assert (FinalPatchExpand((4, 4), (2, 2), 8, dtype="bfloat16", rngs=rngs)(x).dtype
+            == jnp.float32)
+
+
 def test_flat_master_weights_fp32_under_bf16_compute():
     model, _ = make_flat(dtype="bfloat16")
     for path, v in nnx.to_flat_state(nnx.state(model, nnx.Param)):
