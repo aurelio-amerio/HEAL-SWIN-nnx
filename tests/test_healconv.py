@@ -138,17 +138,17 @@ def test_conv_forward_full_sphere_and_south_cap(base_pixels, strategy):
 
 
 def test_conv_jit_matches_eager():
-    model, p = tiny_conv()
+    model, p = tiny_conv(dtype="float32")
     model.eval()
     x = jax.random.normal(jax.random.key(0), (2, p.npix, 3))
-    # tolerance covers bf16-compute reduction-order drift across jit fusion
-    # (default dtype is bfloat16). atol is a bit wider than the 2e-2 baseline:
-    # measured max |diff| for this exact seed is ~0.092 (healconv has fewer
-    # tail-norm amplification sites than healswin, so the fixture-statistics
-    # artifact from test_bf16_drift_within_calibrated_band is smaller here
-    # too); real bugs are >> 0.15.
+    # structural invariant: jit must not change gather/mask/permutation
+    # semantics — dtype-independent, so pinned to fp32 compute. Under the
+    # bf16 default, fixture-scale LayerNorm noise amplification (see the
+    # drift-lock comment in test_precision.py) reaches O(output magnitude)
+    # and would mask exactly the bugs this test exists to catch; bf16
+    # numerics are covered by tests/test_precision.py.
     np.testing.assert_allclose(np.asarray(nnx.jit(lambda m, x: m(x))(model, x)),
-                               np.asarray(model(x)), rtol=2e-2, atol=0.15)
+                               np.asarray(model(x)), rtol=1e-4, atol=1e-4)
 
 
 def test_conv_batch_independence():
