@@ -12,7 +12,10 @@ TRUNC_NORMAL = nnx.initializers.truncated_normal(stddev=0.02)
 
 
 def l2_normalize(x, axis=-1, eps=1e-12):
-    """L2-normalize with a finite gradient at x = 0.
+    """L2-normalize with a finite gradient at x = 0. fp32 island: math runs in
+    float32 regardless of the compute dtype (a bf16 sum-of-squares loses ~5
+    mantissa bits and eps=1e-12 is below bf16 resolution), result is cast back
+    to the input dtype.
 
     ``x / max(||x||, eps)`` NaNs in the backward pass for exactly-zero vectors
     (d/dx ||x|| is 0/0 at x = 0, and the clamp doesn't block the NaN), which
@@ -20,7 +23,9 @@ def l2_normalize(x, axis=-1, eps=1e-12):
     the first attention block. ``rsqrt(sum(x^2) + eps)`` is smooth at 0 and
     matches the clamped division everywhere else.
     """
-    return x * jax.lax.rsqrt(jnp.sum(jnp.square(x), axis=axis, keepdims=True) + eps)
+    x32 = x.astype(jnp.float32)
+    out = x32 * jax.lax.rsqrt(jnp.sum(jnp.square(x32), axis=axis, keepdims=True) + eps)
+    return out.astype(x.dtype)
 
 
 def canonical_float_dtype(value, field_name="param_dtype"):
@@ -74,13 +79,13 @@ class DropPath(nnx.Module):
 
 class Mlp(nnx.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0.0,
-                 param_dtype="float32", *, rngs):
+                 param_dtype="float32", dtype="float32", *, rngs):
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         self.fc1 = nnx.Linear(in_features, hidden_features, kernel_init=TRUNC_NORMAL,
-                              param_dtype=param_dtype, rngs=rngs)
+                              dtype=dtype, param_dtype=param_dtype, rngs=rngs)
         self.fc2 = nnx.Linear(hidden_features, out_features, kernel_init=TRUNC_NORMAL,
-                              param_dtype=param_dtype, rngs=rngs)
+                              dtype=dtype, param_dtype=param_dtype, rngs=rngs)
         self.drop = nnx.Dropout(drop, rngs=rngs)
 
     def __call__(self, x):
@@ -135,12 +140,13 @@ def apply_rope(q, k, table):
 class PatchMerging(nnx.Module):
     """Merge 4 nested pixels into 1: (B, N, C) -> (B, N/4, dim_scale*C)."""
 
-    def __init__(self, dim, dim_scale=2, param_dtype="float32", *, rngs):
+    def __init__(self, dim, dim_scale=2, param_dtype="float32", dtype="float32", *, rngs):
         self.reduction = nnx.Linear(4 * dim, dim_scale * dim, use_bias=False,
-                                    kernel_init=TRUNC_NORMAL, param_dtype=param_dtype,
-                                    rngs=rngs)
-        self.norm = nnx.LayerNorm(4 * dim, epsilon=LN_EPS, param_dtype=param_dtype,
-                                  rngs=rngs)
+                                    kernel_init=TRUNC_NORMAL, dtype=dtype,
+                                    param_dtype=param_dtype, rngs=rngs)
+        # fp32 island; output feeds `reduction` on the same line (self-healing)
+        self.norm = nnx.LayerNorm(4 * dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                  param_dtype=param_dtype, rngs=rngs)
 
     def __call__(self, x):
         B, N, C = x.shape
@@ -152,31 +158,36 @@ class PatchMerging(nnx.Module):
 class PatchExpand(nnx.Module):
     """Expand 1 pixel into 4 nested pixels: (B, N, C) -> (B, 4N, C*dim_scale/4)."""
 
-    def __init__(self, dim, dim_scale=2, param_dtype="float32", *, rngs):
+    def __init__(self, dim, dim_scale=2, param_dtype="float32", dtype="float32", *, rngs):
+        self.dtype = dtype
         self.expand = (nnx.Linear(dim, dim_scale * dim, use_bias=False,
-                                  kernel_init=TRUNC_NORMAL, param_dtype=param_dtype,
-                                  rngs=rngs)
+                                  kernel_init=TRUNC_NORMAL, dtype=dtype,
+                                  param_dtype=param_dtype, rngs=rngs)
                        if dim_scale != 1 else Identity())
         self.norm = nnx.LayerNorm(dim * dim_scale // 4, epsilon=LN_EPS,
-                                  param_dtype=param_dtype, rngs=rngs)
+                                  dtype=jnp.float32, param_dtype=param_dtype, rngs=rngs)
 
     def __call__(self, x):
         x = self.expand(x)
         C = x.shape[-1]
         x = rearrange(x, "b n (p c) -> b (n p) c", p=4, c=C // 4)
-        return self.norm(x)
+        # fp32 norm island exits here: consumers (stage residuals, skip concat)
+        # do not self-heal, so emit the compute dtype
+        return self.norm(x).astype(self.dtype)
 
 
 class FinalPatchExpand(nnx.Module):
     """Undo the patch embedding's downsampling: (B, N, C) -> (B, N*patch_size, C)."""
 
-    def __init__(self, patch_size, dim, param_dtype="float32", *, rngs):
+    def __init__(self, patch_size, dim, param_dtype="float32", dtype="float32", *, rngs):
         self.patch_size = patch_size
         self.expand = nnx.Linear(dim, patch_size * dim, use_bias=False,
-                                 kernel_init=TRUNC_NORMAL, param_dtype=param_dtype,
-                                 rngs=rngs)
-        self.norm = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=param_dtype,
-                                  rngs=rngs)
+                                 kernel_init=TRUNC_NORMAL, dtype=dtype,
+                                 param_dtype=param_dtype, rngs=rngs)
+        # fp32 island with NO exit cast: sole consumer is the fp32 output conv
+        # (deliberate fp32 tail — casting here would round right before it)
+        self.norm = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                  param_dtype=param_dtype, rngs=rngs)
 
     def __call__(self, x):
         x = self.expand(x)
@@ -189,19 +200,22 @@ class PatchEmbed(nnx.Module):
     """Non-overlapping 1D patch embedding over the nested pixel sequence."""
 
     def __init__(self, npix, patch_size, in_channels, embed_dim, norm=False,
-                 param_dtype="float32", *, rngs):
+                 param_dtype="float32", dtype="float32", *, rngs):
         self.npix = npix
+        self.dtype = dtype
         self.num_patches = npix // patch_size
         self.proj = nnx.Conv(in_channels, embed_dim,
                              kernel_size=(patch_size,), strides=(patch_size,),
-                             padding="VALID", param_dtype=param_dtype, rngs=rngs)
-        self.norm = (nnx.LayerNorm(embed_dim, epsilon=LN_EPS, param_dtype=param_dtype,
-                                   rngs=rngs) if norm else None)
+                             padding="VALID", dtype=dtype, param_dtype=param_dtype,
+                             rngs=rngs)
+        self.norm = (nnx.LayerNorm(embed_dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                   param_dtype=param_dtype, rngs=rngs) if norm else None)
 
     def __call__(self, x):  # (B, N, in_channels) channels-last
         assert x.shape[1] == self.npix, (
             "Input map size (%d) doesn't match model (%d)." % (x.shape[1], self.npix))
         x = self.proj(x)
         if self.norm is not None:
-            x = self.norm(x)
+            # fp32 norm island exits straight into stage residuals: emit compute dtype
+            x = self.norm(x).astype(self.dtype)
         return x
