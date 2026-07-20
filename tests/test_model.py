@@ -5,7 +5,8 @@ import pytest
 from flax import nnx
 
 from heal_swin_nnx import HealSwin, HealSwinEncoder, HealSwinParams, SwinParams, SwinUnet
-from heal_swin_nnx.layers import DropPath, Identity, Mlp
+from heal_swin_nnx.layers import (DropPath, FinalPatchExpand, Identity, Mlp, PatchEmbed,
+                                  PatchExpand, PatchMerging)
 
 
 def test_identity():
@@ -195,3 +196,18 @@ def test_flat_rope_buffers_and_params_sorted_correctly():
     param_paths = ["/".join(str(q) for q in path)
                    for path, _ in nnx.to_flat_state(nnx.state(axial, nnx.Param))]
     assert not any("rope_table" in p for p in param_paths)   # fixed table is a Buffer
+
+
+def test_shared_layers_accept_param_dtype():
+    rngs = nnx.Rngs(0)
+    mods = [Mlp(8, 32, param_dtype="bfloat16", rngs=rngs),
+            PatchMerging(8, param_dtype="bfloat16", rngs=rngs),
+            PatchExpand(8, param_dtype="bfloat16", rngs=rngs),
+            FinalPatchExpand(4, 8, param_dtype="bfloat16", rngs=rngs),
+            PatchEmbed(64, 4, 3, 8, norm=True, param_dtype="bfloat16", rngs=rngs)]
+    for m in mods:
+        flat = list(nnx.to_flat_state(nnx.state(m, nnx.Param)))
+        assert len(flat) > 0
+        for path, v in flat:
+            # v[...] (not .value — deprecated in this flax version) reads the array
+            assert v[...].dtype == jnp.bfloat16, (type(m).__name__, path)
