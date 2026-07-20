@@ -213,8 +213,9 @@ class WindowAttention(nnx.Module):
 
         if mask is not None:
             nW = mask.shape[0]
+            # explicit fp32: the logits island must not depend on attn's dtype upstream
             attn = (attn.reshape(B_ // nW, nW, self.num_heads, N, N)
-                    + mask.astype(attn.dtype)[None, :, None])
+                    + mask.astype(jnp.float32)[None, :, None])
             attn = attn.reshape(-1, self.num_heads, N, N)
         attn = jax.nn.softmax(attn, axis=-1).astype(self.dtype)  # island exit
         attn = self.attn_drop(attn)

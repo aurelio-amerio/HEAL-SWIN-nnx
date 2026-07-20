@@ -114,7 +114,11 @@ def test_healswin_stream_is_bf16_inside_blocks(monkeypatch, patch_embed_norm):
     """Leak lock: the dtype entering EVERY block is the compute dtype. Block i's
     entry is block i-1's residual output, so this sweeps all post-norm residual
     casts, PatchMerging's self-heal, PatchExpand's exit cast, the concat path,
-    and (parametrized) the PatchEmbed-norm exit cast."""
+    and (parametrized) the PatchEmbed-norm exit cast.
+    NOTE: in this 2-stage fixture the decoder's only PatchExpand output flows
+    through the self-healing concat Linear before any spied block, so this spy
+    does NOT reach PatchExpand's exit cast — that cast is guarded at block
+    level by test_shared_blocks_emit_compute_dtype (and the swin-local twin)."""
     seen = _block_entry_spy(monkeypatch, HealSwinBlock)
     model, p = make_healswin(dtype="bfloat16", patch_embed_norm=patch_embed_norm)
     model.eval()
@@ -164,7 +168,7 @@ def test_swin_local_blocks_emit_compute_dtype():
     test_shared_blocks_emit_compute_dtype above)."""
     from heal_swin_nnx.models.swin import FinalPatchExpand, PatchExpand, PatchMerging
     rngs = nnx.Rngs(0)
-    x = jnp.ones((2, 16, 8), jnp.bfloat16)   # 4x4 resolution, C=8
+    x = jnp.ones((2, 16, 8), jnp.bfloat16)   # (B, H*W, C): 16 tokens = 4x4 resolution, C=8
     assert PatchMerging((4, 4), 8, dtype="bfloat16", rngs=rngs)(x).dtype == jnp.bfloat16
     assert PatchExpand((4, 4), 8, dtype="bfloat16", rngs=rngs)(x).dtype == jnp.bfloat16
     # FinalPatchExpand's sole consumer is the fp32 output conv: deliberate fp32 tail
