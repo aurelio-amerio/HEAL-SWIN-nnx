@@ -148,18 +148,21 @@ class WindowAttention(nnx.Module):
         self.num_heads = num_heads
         self.pos_embed = params.pos_embed
         head_dim = dim // num_heads
-        self.logit_scale = nnx.Param(jnp.log(10.0 * jnp.ones((num_heads, 1, 1))))
+        self.logit_scale = nnx.Param(
+            jnp.full((num_heads, 1, 1), jnp.log(10.0), dtype=params.param_dtype))
 
         if self.pos_embed == "rel_bias":
             s = int(round(window_size ** 0.5))
             assert s * s == window_size, "rel_bias needs a square (power-of-4) window"
             self.relative_position_bias_table = nnx.Param(
-                TRUNC_NORMAL(rngs.params(), ((2 * s - 1) ** 2, num_heads)))
+                TRUNC_NORMAL(rngs.params(), ((2 * s - 1) ** 2, num_heads),
+                             params.param_dtype))
             self.relative_position_index = Buffer(
                 jnp.asarray(nest_relative_position_index(window_size)))
         elif self.pos_embed in ("rope_axial", "rope_mixed"):
             coords = jnp.asarray(nest_win_coords(window_size))  # (2, window_size)
             if self.pos_embed == "rope_mixed":
+                # rope_freqs stays f32: it feeds the f32 angle computation (see apply_rope)
                 self.rope_freqs = nnx.Param(init_rope_freqs(
                     head_dim, num_heads, params.rope_theta, key=rngs.params()))
                 self.rope_coords = Buffer(coords)
@@ -168,9 +171,11 @@ class WindowAttention(nnx.Module):
                 self.rope_table = Buffer(rope_rotation_table(freqs, coords[0], coords[1]))
 
         self.qkv = nnx.Linear(dim, dim * 3, use_bias=params.qkv_bias,
-                              kernel_init=TRUNC_NORMAL, rngs=rngs)
+                              kernel_init=TRUNC_NORMAL, param_dtype=params.param_dtype,
+                              rngs=rngs)
         self.attn_drop = nnx.Dropout(params.attn_drop_rate, rngs=rngs)
-        self.proj = nnx.Linear(dim, dim, kernel_init=TRUNC_NORMAL, rngs=rngs)
+        self.proj = nnx.Linear(dim, dim, kernel_init=TRUNC_NORMAL,
+                               param_dtype=params.param_dtype, rngs=rngs)
         self.proj_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
 
     def __call__(self, x, mask=None):
@@ -197,7 +202,8 @@ class WindowAttention(nnx.Module):
 
         if mask is not None:
             nW = mask.shape[0]
-            attn = attn.reshape(B_ // nW, nW, self.num_heads, N, N) + mask[None, :, None]
+            attn = (attn.reshape(B_ // nW, nW, self.num_heads, N, N)
+                    + mask.astype(attn.dtype)[None, :, None])
             attn = attn.reshape(-1, self.num_heads, N, N)
         attn = jax.nn.softmax(attn, axis=-1)
         attn = self.attn_drop(attn)
@@ -213,11 +219,14 @@ class HealSwinBlock(nnx.Module):
         shift_size = params.shift_size if (shifted
                                            and input_resolution > params.window_size) else 0
 
-        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
+        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=params.param_dtype,
+                                   rngs=rngs)
         self.attn = WindowAttention(params, dim, num_heads, self.window_size, rngs=rngs)
         self.drop_path = DropPath(drop_path, rngs=rngs) if drop_path > 0.0 else Identity()
-        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, rngs=rngs)
-        self.mlp = Mlp(dim, int(dim * params.mlp_ratio), drop=params.drop_rate, rngs=rngs)
+        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=params.param_dtype,
+                                   rngs=rngs)
+        self.mlp = Mlp(dim, int(dim * params.mlp_ratio), drop=params.drop_rate,
+                       param_dtype=params.param_dtype, rngs=rngs)
 
         nside = math.isqrt(input_resolution // len(params.base_pixels))
         assert nside * nside * len(params.base_pixels) == input_resolution, \
@@ -268,7 +277,8 @@ class EncoderStage(nnx.Module):
         self.use_checkpoint = params.use_checkpoint
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
                                             num_heads, drop_path, rngs))
-        self.downsample = PatchMerging(dim=dim, rngs=rngs) if downsample else None
+        self.downsample = (PatchMerging(dim=dim, param_dtype=params.param_dtype,
+                                        rngs=rngs) if downsample else None)
 
     def __call__(self, x):
         for blk in self.blocks:
@@ -284,7 +294,9 @@ class DecoderStage(nnx.Module):
         self.use_checkpoint = params.use_checkpoint
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
                                             num_heads, drop_path, rngs))
-        self.upsample = PatchExpand(dim=dim, dim_scale=2, rngs=rngs) if upsample else None
+        self.upsample = (PatchExpand(dim=dim, dim_scale=2,
+                                     param_dtype=params.param_dtype, rngs=rngs)
+                         if upsample else None)
 
     def __call__(self, x):
         for blk in self.blocks:
@@ -307,7 +319,8 @@ class HealSwinEncoder(nnx.Module):
         self.num_layers = len(params.depths)
         self.num_features = int(params.embed_dim * 2 ** (self.num_layers - 1))
         self.patch_embed = PatchEmbed(params.npix, params.patch_size, params.in_channels,
-                                      params.embed_dim, params.patch_embed_norm, rngs=rngs)
+                                      params.embed_dim, params.patch_embed_norm,
+                                      param_dtype=params.param_dtype, rngs=rngs)
         self.pos_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
 
         num_patches = self.patch_embed.num_patches
@@ -321,9 +334,11 @@ class HealSwinEncoder(nnx.Module):
                 drop_path=dpr[sum(params.depths[:i]):sum(params.depths[:i + 1])],
                 downsample=i < self.num_layers - 1, rngs=rngs))
         self.layers = nnx.List(layers)
-        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS, rngs=rngs)
+        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS,
+                                  param_dtype=params.param_dtype, rngs=rngs)
 
     def __call__(self, x):
+        x = jnp.asarray(x, dtype=self.params.param_dtype)
         x = self.patch_embed(x)
         x = self.pos_drop(x)
         skips = []
@@ -346,10 +361,12 @@ class HealSwinDecoder(nnx.Module):
             down_idx = self.num_layers - 1 - i_layer
             dim = int(params.embed_dim * 2 ** down_idx)
             concat_back_dim.append(
-                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL, rngs=rngs)
+                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL,
+                           param_dtype=params.param_dtype, rngs=rngs)
                 if i_layer > 0 else Identity())
             if i_layer == 0:
-                layers_up.append(PatchExpand(dim=dim, dim_scale=2, rngs=rngs))
+                layers_up.append(PatchExpand(dim=dim, dim_scale=2,
+                                             param_dtype=params.param_dtype, rngs=rngs))
             else:
                 layers_up.append(DecoderStage(
                     params, dim=dim, input_resolution=num_patches // 4 ** down_idx,
@@ -359,11 +376,12 @@ class HealSwinDecoder(nnx.Module):
                     upsample=down_idx > 0, rngs=rngs))
         self.layers_up = nnx.List(layers_up)
         self.concat_back_dim = nnx.List(concat_back_dim)
-        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, rngs=rngs)
+        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS,
+                                     param_dtype=params.param_dtype, rngs=rngs)
         self.up = FinalPatchExpand(patch_size=params.patch_size, dim=params.embed_dim,
-                                   rngs=rngs)
+                                   param_dtype=params.param_dtype, rngs=rngs)
         self.output = nnx.Conv(params.embed_dim, params.out_channels, kernel_size=(1,),
-                               use_bias=False, rngs=rngs)
+                               use_bias=False, param_dtype=params.param_dtype, rngs=rngs)
 
     def __call__(self, x, skips):
         for inx, layer_up in enumerate(self.layers_up):

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from heal_swin_nnx import HealSwin, HealSwinEncoder, HealSwinParams, SwinParams, SwinUnet
+from heal_swin_nnx import Buffer, HealSwin, HealSwinEncoder, HealSwinParams, SwinParams, SwinUnet
 from heal_swin_nnx.layers import (DropPath, FinalPatchExpand, Identity, Mlp, PatchEmbed,
                                   PatchExpand, PatchMerging)
 
@@ -211,3 +211,31 @@ def test_shared_layers_accept_param_dtype():
         for path, v in flat:
             # v[...] (not .value — deprecated in this flax version) reads the array
             assert v[...].dtype == jnp.bfloat16, (type(m).__name__, path)
+
+
+def _param_dtypes(model):
+    return {"/".join(str(q) for q in path): v[...].dtype
+            for path, v in nnx.to_flat_state(nnx.state(model, nnx.Param))}
+
+
+def _buffer_dtypes(model):
+    return {"/".join(str(q) for q in path): v[...].dtype
+            for path, v in nnx.to_flat_state(nnx.state(model, Buffer))}
+
+
+@pytest.mark.parametrize("pos_embed", ["rope_mixed", "rope_axial", "rel_bias"])
+def test_healswin_param_dtype_propagates(pos_embed):
+    model, p = tiny_hp(param_dtype="bfloat16", pos_embed=pos_embed)
+    model.eval()
+    for path, dtype in _param_dtypes(model).items():
+        # rope_freqs feeds the f32 RoPE angle computation and stays f32 by design
+        expected = jnp.float32 if "rope_freqs" in path else jnp.bfloat16
+        assert dtype == expected, path
+
+    ref, _ = tiny_hp(pos_embed=pos_embed)          # buffers ignore param_dtype
+    assert _buffer_dtypes(model) == _buffer_dtypes(ref)
+
+    x = jax.random.normal(jax.random.key(0), (2, p.npix, 3))
+    y = model(x)
+    assert y.dtype == jnp.bfloat16 and y.shape == (2, p.npix, 5)
+    assert bool(jnp.isfinite(y).all())
