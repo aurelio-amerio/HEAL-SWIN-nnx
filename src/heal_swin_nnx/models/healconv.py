@@ -154,17 +154,19 @@ class HealConvBlock(nnx.Module):
         self.grid_perm = Buffer(jnp.asarray(grid))
         self.inv_perm = Buffer(jnp.asarray(np.argsort(grid)))
 
+        self.dtype = params.dtype
         self.dwconv = nnx.Conv(dim, dim, kernel_size=(self.grid_size, self.grid_size),
                                feature_group_count=dim, padding="SAME",
                                use_bias=params.conv_bias, kernel_init=TRUNC_NORMAL,
-                               param_dtype=params.param_dtype, rngs=rngs)
-        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=params.param_dtype,
-                                   rngs=rngs)
+                               dtype=params.dtype, param_dtype=params.param_dtype,
+                               rngs=rngs)
+        self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                   param_dtype=params.param_dtype, rngs=rngs)
         self.drop_path = DropPath(drop_path, rngs=rngs) if drop_path > 0.0 else Identity()
-        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, param_dtype=params.param_dtype,
-                                   rngs=rngs)
+        self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
+                                   param_dtype=params.param_dtype, rngs=rngs)
         self.mlp = Mlp(dim, int(dim * params.mlp_ratio), drop=params.drop_rate,
-                       param_dtype=params.param_dtype, rngs=rngs)
+                       dtype=params.dtype, param_dtype=params.param_dtype, rngs=rngs)
 
         nside = math.isqrt(input_resolution // len(params.base_pixels))
         assert nside * nside * len(params.base_pixels) == input_resolution, \
@@ -223,8 +225,10 @@ class HealConvBlock(nnx.Module):
         return self.shifter.shift_back(shifted_x)
 
     def __call__(self, x):
-        x = x + self.drop_path(self.norm1(self._mix(x)))
-        return x + self.drop_path(self.norm2(self.mlp(x)))
+        # fp32 norm islands exit here: cast BEFORE the residual add — adds do
+        # not self-heal, one fp32 summand re-promotes the whole downstream stream
+        x = x + self.drop_path(self.norm1(self._mix(x)).astype(self.dtype))
+        return x + self.drop_path(self.norm2(self.mlp(x)).astype(self.dtype))
 
 
 def _drop_path_schedule(params):
@@ -242,7 +246,8 @@ class ConvEncoderStage(nnx.Module):
         self.use_checkpoint = params.use_checkpoint
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
                                             drop_path, rngs))
-        self.downsample = (PatchMerging(dim=dim, param_dtype=params.param_dtype,
+        self.downsample = (PatchMerging(dim=dim, dtype=params.dtype,
+                                        param_dtype=params.param_dtype,
                                         rngs=rngs) if downsample else None)
 
     def __call__(self, x):
@@ -258,7 +263,7 @@ class ConvDecoderStage(nnx.Module):
         self.use_checkpoint = params.use_checkpoint
         self.blocks = nnx.List(_make_blocks(params, dim, input_resolution, depth,
                                             drop_path, rngs))
-        self.upsample = (PatchExpand(dim=dim, dim_scale=2,
+        self.upsample = (PatchExpand(dim=dim, dim_scale=2, dtype=params.dtype,
                                      param_dtype=params.param_dtype, rngs=rngs)
                          if upsample else None)
 
@@ -280,6 +285,7 @@ class HealConvEncoder(nnx.Module):
         self.num_features = int(params.embed_dim * 2 ** (self.num_layers - 1))
         self.patch_embed = PatchEmbed(params.npix, params.patch_size, params.in_channels,
                                       params.embed_dim, params.patch_embed_norm,
+                                      dtype=params.dtype,
                                       param_dtype=params.param_dtype, rngs=rngs)
         self.pos_drop = nnx.Dropout(params.drop_rate, rngs=rngs)
 
@@ -294,11 +300,11 @@ class HealConvEncoder(nnx.Module):
                 drop_path=dpr[sum(params.depths[:i]):sum(params.depths[:i + 1])],
                 downsample=i < self.num_layers - 1, rngs=rngs))
         self.layers = nnx.List(layers)
-        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS,
+        self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS, dtype=jnp.float32,
                                   param_dtype=params.param_dtype, rngs=rngs)
 
     def __call__(self, x):
-        x = jnp.asarray(x, dtype=self.params.param_dtype)
+        x = jnp.asarray(x, dtype=jnp.float32)
         x = self.patch_embed(x)
         x = self.pos_drop(x)
         skips = []
@@ -321,11 +327,11 @@ class HealConvDecoder(nnx.Module):
             down_idx = self.num_layers - 1 - i_layer
             dim = int(params.embed_dim * 2 ** down_idx)
             concat_back_dim.append(
-                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL,
+                nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL, dtype=params.dtype,
                            param_dtype=params.param_dtype, rngs=rngs)
                 if i_layer > 0 else Identity())
             if i_layer == 0:
-                layers_up.append(PatchExpand(dim=dim, dim_scale=2,
+                layers_up.append(PatchExpand(dim=dim, dim_scale=2, dtype=params.dtype,
                                              param_dtype=params.param_dtype, rngs=rngs))
             else:
                 layers_up.append(ConvDecoderStage(
@@ -336,12 +342,15 @@ class HealConvDecoder(nnx.Module):
                     upsample=down_idx > 0, rngs=rngs))
         self.layers_up = nnx.List(layers_up)
         self.concat_back_dim = nnx.List(concat_back_dim)
-        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS,
+        self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, dtype=jnp.float32,
                                      param_dtype=params.param_dtype, rngs=rngs)
         self.up = FinalPatchExpand(patch_size=params.patch_size, dim=params.embed_dim,
+                                   dtype=params.dtype,
                                    param_dtype=params.param_dtype, rngs=rngs)
+        # emit-fp32 endpoint: constructed fp32 (never a post-hoc astype)
         self.output = nnx.Conv(params.embed_dim, params.out_channels, kernel_size=(1,),
-                               use_bias=False, param_dtype=params.param_dtype, rngs=rngs)
+                               use_bias=False, dtype=jnp.float32,
+                               param_dtype=params.param_dtype, rngs=rngs)
 
     def __call__(self, x, skips):
         for inx, layer_up in enumerate(self.layers_up):

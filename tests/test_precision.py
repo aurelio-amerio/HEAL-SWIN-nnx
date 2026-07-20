@@ -215,3 +215,46 @@ def test_flat_softmax_island_is_fp32(monkeypatch):
     model.eval()
     model(_smooth_input_2d(jax.random.key(0), p.img_size, 2))
     assert seen and all(dt == jnp.float32 for dt in seen), seen
+
+
+# --- HealConv ---------------------------------------------------------------
+
+from heal_swin_nnx.models.healconv import HealConv, HealConvBlock, HealConvParams
+
+
+def make_healconv(**over):
+    kw = dict(nside=16, in_channels=3, out_channels=2, base_pixels=(0, 1, 2, 3),
+              embed_dim=16, depths=(2, 2), drop_path_rate=0.0)
+    kw.update(over)
+    p = HealConvParams(**kw)
+    return HealConv(p, rngs=nnx.Rngs(0)), p
+
+
+def test_healconv_master_weights_fp32_under_bf16_compute():
+    model, _ = make_healconv(dtype="bfloat16")
+    for path, v in nnx.to_flat_state(nnx.state(model, nnx.Param)):
+        assert v[...].dtype == jnp.float32, path
+
+
+def test_healconv_output_and_grads_fp32():
+    model, p = make_healconv(dtype="bfloat16")
+    model.eval()
+    x = _smooth_input(jax.random.key(0), p.npix, 3)
+    y = model(x)
+    assert y.dtype == jnp.float32 and bool(jnp.isfinite(y).all())
+    tokens, _ = model.encoder(x)
+    assert tokens.dtype == jnp.float32
+    grads = nnx.grad(lambda m: jnp.mean(m(x) ** 2))(model)
+    for path, g in nnx.to_flat_state(grads):
+        joined = "/".join(str(q) for q in path)
+        assert g[...].dtype == jnp.float32, joined
+
+
+@pytest.mark.parametrize("patch_embed_norm", [False, True])
+def test_healconv_stream_is_bf16_inside_blocks(monkeypatch, patch_embed_norm):
+    seen = _block_entry_spy(monkeypatch, HealConvBlock)
+    model, p = make_healconv(dtype="bfloat16", patch_embed_norm=patch_embed_norm)
+    model.eval()
+    model(_smooth_input(jax.random.key(0), p.npix, 3))
+    assert len(seen) >= 6
+    assert all(dt == jnp.bfloat16 for dt in seen), seen
