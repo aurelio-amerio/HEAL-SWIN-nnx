@@ -23,28 +23,30 @@ def l2_normalize(x, axis=-1, eps=1e-12):
     return x * jax.lax.rsqrt(jnp.sum(jnp.square(x), axis=axis, keepdims=True) + eps)
 
 
-def canonical_float_dtype(value):
+def canonical_float_dtype(value, field_name="param_dtype"):
     """Canonicalize a DTypeLike into its dtype name ("float32", "bfloat16", ...).
 
     Params dataclasses store dtypes as canonical strings so
     ``json.dumps(dataclasses.asdict(params))`` keeps working; every jnp/nnx
-    API accepts the string form. Floating dtypes only."""
+    API accepts the string form. Floating dtypes only. ``field_name`` labels
+    error messages (the same helper validates ``param_dtype`` and ``dtype``)."""
     if value is None:
         # numpy resolves dtype(None) to float64 (its legacy default dtype);
-        # that's never an intentional param_dtype choice.
-        raise ValueError("param_dtype must be a floating DTypeLike, got %r" % (value,))
+        # that's never an intentional dtype choice.
+        raise ValueError("%s must be a floating DTypeLike, got %r" % (field_name, value))
     try:
         dt = jnp.dtype(value)
     except TypeError as e:
-        raise ValueError("param_dtype must be a floating DTypeLike, got %r"
-                         % (value,)) from e
+        raise ValueError("%s must be a floating DTypeLike, got %r"
+                         % (field_name, value)) from e
     if not jnp.issubdtype(dt, jnp.floating):
-        raise ValueError("param_dtype must be a floating dtype, got %r" % (value,))
+        raise ValueError("%s must be a floating dtype, got %r" % (field_name, value))
     if dt.name == "float64" and not jax.config.jax_enable_x64:
         raise ValueError(
-            "param_dtype='float64' requires enabling jax_enable_x64 before "
+            "%s='float64' requires enabling jax_enable_x64 before "
             "constructing params (jax.config.update('jax_enable_x64', True)); "
-            "otherwise jnp array creation silently yields float32, got %r" % (value,))
+            "otherwise jnp array creation silently yields float32, got %r"
+            % (field_name, value))
     return dt.name
 
 

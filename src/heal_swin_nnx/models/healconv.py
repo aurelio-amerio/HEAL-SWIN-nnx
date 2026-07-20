@@ -53,14 +53,18 @@ class HealConvParams:
     use_checkpoint: bool = False
 
     # precision
-    param_dtype: str = "float32"     # any DTypeLike accepted; stored as the dtype name
+    param_dtype: str = "float32"     # parameter storage; any DTypeLike, stored as name
+    dtype: str = "float32"           # compute/matmul dtype; "float32" is a staging
+                                     # default — flipped to "bfloat16" in the final
+                                     # task of the compute-dtype plan
 
     def __post_init__(self):
         if self.base_pixels is None:
             self.base_pixels = tuple(range(12))
         self.base_pixels = tuple(self.base_pixels)
         self.depths = tuple(self.depths)
-        self.param_dtype = canonical_float_dtype(self.param_dtype)
+        self.param_dtype = canonical_float_dtype(self.param_dtype, "param_dtype")
+        self.dtype = canonical_float_dtype(self.dtype, "dtype")
 
         if any(not 0 <= b <= 11 for b in self.base_pixels):
             raise ValueError("base_pixels must be in [0, 11], got %r" % (self.base_pixels,))

@@ -45,7 +45,10 @@ class SwinParams:
     use_checkpoint: bool = False
 
     # precision
-    param_dtype: str = "float32"     # any DTypeLike accepted; stored as the dtype name
+    param_dtype: str = "float32"     # parameter storage; any DTypeLike, stored as name
+    dtype: str = "float32"           # compute/matmul dtype; "float32" is a staging
+                                     # default — flipped to "bfloat16" in the final
+                                     # task of the compute-dtype plan
 
     def __post_init__(self):
         self.img_size = _pair(self.img_size)
@@ -53,7 +56,8 @@ class SwinParams:
         self.window_size = _pair(self.window_size)
         self.depths = tuple(self.depths)
         self.num_heads = tuple(self.num_heads)
-        self.param_dtype = canonical_float_dtype(self.param_dtype)
+        self.param_dtype = canonical_float_dtype(self.param_dtype, "param_dtype")
+        self.dtype = canonical_float_dtype(self.dtype, "dtype")
 
         if self.pos_embed not in POS_EMBEDS:
             raise ValueError("pos_embed must be one of %r, got %r"

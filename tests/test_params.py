@@ -259,3 +259,36 @@ def test_param_dtype_rejects_float64_without_x64(mk):
     assert not jax.config.jax_enable_x64
     with pytest.raises(ValueError):
         mk(param_dtype="float64")
+
+
+# --- compute dtype ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("mk", PARAMS_FACTORIES)
+def test_dtype_canonicalization(mk):
+    for spec in ("bfloat16", jnp.bfloat16, jnp.dtype(jnp.bfloat16)):
+        p = mk(dtype=spec)
+        assert p.dtype == "bfloat16"
+        json.dumps(dataclasses.asdict(p))  # must stay serializable
+
+
+@pytest.mark.parametrize("mk", PARAMS_FACTORIES)
+@pytest.mark.parametrize("bad", ["int32", "bool", "not_a_dtype", 7, None])
+def test_dtype_rejects_non_floats(mk, bad):
+    # \bdtype does NOT match "param_dtype" ('_' is a word char): this verifies
+    # the error message names the *compute* knob, i.e. the field_name plumbing.
+    with pytest.raises(ValueError, match=r"\bdtype"):
+        mk(dtype=bad)
+
+
+@pytest.mark.parametrize("mk", PARAMS_FACTORIES)
+def test_dtype_rejects_float64_without_x64(mk):
+    assert not jax.config.jax_enable_x64
+    with pytest.raises(ValueError):
+        mk(dtype="float64")
+
+
+@pytest.mark.parametrize("mk", PARAMS_FACTORIES)
+def test_precision_knobs_independent(mk):
+    p = mk(param_dtype="bfloat16", dtype="float32")
+    assert p.param_dtype == "bfloat16" and p.dtype == "float32"
