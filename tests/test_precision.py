@@ -258,3 +258,70 @@ def test_healconv_stream_is_bf16_inside_blocks(monkeypatch, patch_embed_norm):
     model(_smooth_input(jax.random.key(0), p.npix, 3))
     assert len(seen) >= 6
     assert all(dt == jnp.bfloat16 for dt in seen), seen
+
+
+# --- calibrated drift lock --------------------------------------------------
+
+# Measured on CPU, 2026-07-20, seeds 0-9, smooth sinusoid inputs, the tiny
+# fixtures above (same-seed fp32 master weights): per-model max relative error
+# between dtype="float32" and dtype="bfloat16" forwards.
+#
+# healswin/swin maxes are large (0.42 / 0.58) relative to the naive 3e-3..6e-2
+# expectation. Root cause, verified by stage-by-stage bisection (encoder ->
+# decoder blocks -> decoder-tail LayerNorms -> output) plus the fp32-island
+# spy tests above (all still pass, no missing cast found): these tiny
+# fixtures are random-init, never-trained models, so per-token activations
+# going into the decoder's tail LayerNorms are not well-conditioned the way a
+# trained network's would be. Ordinary bf16 rounding noise accumulates
+# gradually and modestly through the stream (encoder tokens: ~0.03; decoder
+# blocks: ~0.03 -> ~0.10), then each tail LayerNorm divides that noise by a
+# small per-token sigma, amplifying it roughly 3x per norm (~0.10 -> ~0.30
+# after norm_up -> ~0.39 after FinalPatchExpand's norm -> ~0.42 at the
+# output). healconv has fewer tail norms in this position and stays inside
+# the naive range (0.032). This is a fixture-statistics artifact of
+# random-init models, not a leak; trained models are expected to drift far
+# less. If this test fails after a legitimate numerics change, re-run the
+# assessment block from docs/superpowers/plans/2026-07-20-compute-dtype.md
+# Task 6 and re-calibrate.
+DRIFT_BOUND = {
+    "healswin": 0.416,
+    "swin": 0.5756,
+    "healconv": 0.03183,
+}
+
+
+@pytest.mark.parametrize("name", ["healswin", "swin", "healconv"])
+def test_bf16_drift_within_calibrated_band(name):
+    make, x_of = {
+        "healswin": (make_healswin,
+                     lambda p, s: _smooth_input(jax.random.key(s), p.npix, 3)),
+        "swin": (make_flat,
+                 lambda p, s: _smooth_input_2d(jax.random.key(s), p.img_size, 2)),
+        "healconv": (make_healconv,
+                     lambda p, s: _smooth_input(jax.random.key(s), p.npix, 3)),
+    }[name]
+    m32, p = make(dtype="float32")
+    m16, _ = make(dtype="bfloat16")     # same rngs seed -> identical master weights
+    m32.eval(); m16.eval()
+    errs = [_rel_err(m32(x), m16(x)) for x in (x_of(p, s) for s in range(10))]
+    bound = DRIFT_BOUND[name]
+    # upper lock: mixed-precision computation quality regressed (dropped cast,
+    # removed island, changed accumulation). Multiplier left at the brief's
+    # default *3: RED-verified for the lower canary (see below), but the
+    # prescribed upper-bound probe for healswin (hard-coding the softmax
+    # island exit `.astype(self.dtype)` -> `.astype(jnp.bfloat16)`, which also
+    # corrupts the fp32 reference) measured max=0.392 < the locked bound
+    # (0.416) at the same worst seed -- it does NOT trip this assertion at
+    # any multiplier > 1, since the corrupted run is *below* the bound it
+    # would need to exceed. Root cause: with embed_dim=16 these fixtures'
+    # LayerNorm reductions are too small for fp32-vs-bf16 accumulation to
+    # matter, and the extra bf16 rounding this probe adds to the reference's
+    # softmax happens to anti-correlate with existing bf16 model noise at the
+    # worst seed rather than add to it. No multiplier change was made because
+    # none exists that both fails this probe and keeps this test passing
+    # uncorrupted; see task-6-report.md for the full investigation and a
+    # recommended alternative upper-bound probe.
+    assert max(errs) < bound * 3, (name, errs)
+    # lower canary: near-zero drift means bf16 compute silently stopped
+    # happening — the knob is dead while every tolerance test still passes
+    assert max(errs) > bound / 50, (name, errs)
