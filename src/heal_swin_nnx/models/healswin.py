@@ -14,8 +14,8 @@ from heal_swin_nnx.hp.windowing import (
     nest_relative_position_index, nest_win_coords, window_partition, window_reverse)
 from heal_swin_nnx.layers import (
     LN_EPS, TRUNC_NORMAL, DropPath, FinalPatchExpand, Identity, Mlp, PatchEmbed,
-    PatchExpand, PatchMerging, apply_rope, init_rope_freqs, l2_normalize,
-    rope_rotation_table)
+    PatchExpand, PatchMerging, apply_rope, canonical_float_dtype, init_rope_freqs,
+    l2_normalize, rope_rotation_table)
 from heal_swin_nnx.variables import Buffer
 
 POS_EMBEDS = ("none", "rel_bias", "rope_axial", "rope_mixed")
@@ -54,12 +54,16 @@ class HealSwinParams:
     drop_path_rate: float = 0.1
     use_checkpoint: bool = False
 
+    # precision
+    param_dtype: str = "float32"     # any DTypeLike accepted; stored as the dtype name
+
     def __post_init__(self):
         if self.base_pixels is None:
             self.base_pixels = tuple(range(12))
         self.base_pixels = tuple(self.base_pixels)
         self.depths = tuple(self.depths)
         self.num_heads = tuple(self.num_heads)
+        self.param_dtype = canonical_float_dtype(self.param_dtype)
 
         if any(not 0 <= b <= 11 for b in self.base_pixels):
             raise ValueError("base_pixels must be in [0, 11], got %r" % (self.base_pixels,))

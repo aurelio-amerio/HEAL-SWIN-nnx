@@ -23,6 +23,22 @@ def l2_normalize(x, axis=-1, eps=1e-12):
     return x * jax.lax.rsqrt(jnp.sum(jnp.square(x), axis=axis, keepdims=True) + eps)
 
 
+def canonical_float_dtype(value):
+    """Canonicalize a DTypeLike into its dtype name ("float32", "bfloat16", ...).
+
+    Params dataclasses store dtypes as canonical strings so
+    ``json.dumps(dataclasses.asdict(params))`` keeps working; every jnp/nnx
+    API accepts the string form. Floating dtypes only."""
+    try:
+        dt = jnp.dtype(value)
+    except TypeError as e:
+        raise ValueError("param_dtype must be a floating DTypeLike, got %r"
+                         % (value,)) from e
+    if not jnp.issubdtype(dt, jnp.floating):
+        raise ValueError("param_dtype must be a floating dtype, got %r" % (value,))
+    return dt.name
+
+
 class Identity(nnx.Module):
     def __call__(self, x):
         return x

@@ -19,7 +19,7 @@ from heal_swin_nnx.hp.shifting import SHIFT_STRATEGIES
 from heal_swin_nnx.hp.windowing import get_nest_win_idcs, window_partition, window_reverse
 from heal_swin_nnx.layers import (
     LN_EPS, TRUNC_NORMAL, DropPath, FinalPatchExpand, Identity, Mlp, PatchEmbed,
-    PatchExpand, PatchMerging)
+    PatchExpand, PatchMerging, canonical_float_dtype)
 from heal_swin_nnx.variables import Buffer
 
 
@@ -52,11 +52,15 @@ class HealConvParams:
     drop_path_rate: float = 0.1
     use_checkpoint: bool = False
 
+    # precision
+    param_dtype: str = "float32"     # any DTypeLike accepted; stored as the dtype name
+
     def __post_init__(self):
         if self.base_pixels is None:
             self.base_pixels = tuple(range(12))
         self.base_pixels = tuple(self.base_pixels)
         self.depths = tuple(self.depths)
+        self.param_dtype = canonical_float_dtype(self.param_dtype)
 
         if any(not 0 <= b <= 11 for b in self.base_pixels):
             raise ValueError("base_pixels must be in [0, 11], got %r" % (self.base_pixels,))

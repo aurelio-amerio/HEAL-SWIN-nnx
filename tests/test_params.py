@@ -1,6 +1,7 @@
 import dataclasses
 import json
 
+import jax.numpy as jnp
 import pytest
 
 from heal_swin_nnx.models.healswin import HealSwinParams
@@ -221,3 +222,30 @@ def test_healconv_nest_grid_shift_requires_window_sized_bottleneck():
     # 3 stages -> per-face bottleneck 16 >= 16 -> fine
     HealConvParams(nside=32, in_channels=1, out_channels=1, depths=(2, 2, 2),
                    shift_strategy="nest_grid_shift")
+
+
+# --- param_dtype ------------------------------------------------------------
+
+PARAMS_FACTORIES = [
+    lambda **over: HealSwinParams(nside=16, in_channels=1, out_channels=1, **over),
+    lambda **over: HealConvParams(nside=16, in_channels=1, out_channels=1,
+                                  depths=(2, 2), **over),
+    lambda **over: SwinParams(img_size=(32, 64), in_channels=1, out_channels=1,
+                              embed_dim=16, depths=(2, 2), num_heads=(2, 4), **over),
+]
+
+
+@pytest.mark.parametrize("mk", PARAMS_FACTORIES)
+def test_param_dtype_defaults_and_canonicalization(mk):
+    assert mk().param_dtype == "float32"
+    for spec in ("bfloat16", jnp.bfloat16, jnp.dtype(jnp.bfloat16)):
+        p = mk(param_dtype=spec)
+        assert p.param_dtype == "bfloat16"
+        json.dumps(dataclasses.asdict(p))  # must stay serializable
+
+
+@pytest.mark.parametrize("mk", PARAMS_FACTORIES)
+@pytest.mark.parametrize("bad", ["int32", "bool", "not_a_dtype", 7])
+def test_param_dtype_rejects_non_floats(mk, bad):
+    with pytest.raises(ValueError):
+        mk(param_dtype=bad)

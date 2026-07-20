@@ -9,8 +9,8 @@ from einops import rearrange
 from flax import nnx
 
 from heal_swin_nnx.layers import (
-    LN_EPS, TRUNC_NORMAL, DropPath, Identity, Mlp, apply_rope, init_rope_freqs,
-    l2_normalize, rope_rotation_table)
+    LN_EPS, TRUNC_NORMAL, DropPath, Identity, Mlp, apply_rope, canonical_float_dtype,
+    init_rope_freqs, l2_normalize, rope_rotation_table)
 from heal_swin_nnx.models.healswin import POS_EMBEDS
 from heal_swin_nnx.variables import Buffer
 
@@ -44,12 +44,16 @@ class SwinParams:
     drop_path_rate: float = 0.1
     use_checkpoint: bool = False
 
+    # precision
+    param_dtype: str = "float32"     # any DTypeLike accepted; stored as the dtype name
+
     def __post_init__(self):
         self.img_size = _pair(self.img_size)
         self.patch_size = _pair(self.patch_size)
         self.window_size = _pair(self.window_size)
         self.depths = tuple(self.depths)
         self.num_heads = tuple(self.num_heads)
+        self.param_dtype = canonical_float_dtype(self.param_dtype)
 
         if self.pos_embed not in POS_EMBEDS:
             raise ValueError("pos_embed must be one of %r, got %r"
