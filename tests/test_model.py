@@ -237,7 +237,8 @@ def test_healswin_param_dtype_propagates(pos_embed):
 
     x = jax.random.normal(jax.random.key(0), (2, p.npix, 3))
     y = model(x)
-    assert y.dtype == jnp.bfloat16 and y.shape == (2, p.npix, 5)
+    # models emit fp32: the output conv is an fp32 island regardless of knobs
+    assert y.dtype == jnp.float32 and y.shape == (2, p.npix, 5)
     assert bool(jnp.isfinite(y).all())
 
 
@@ -270,5 +271,6 @@ def test_flat_param_dtype_propagates(pos_embed):
 
     x = jax.random.normal(jax.random.key(0), (2, *p.img_size, 2))
     y = model(x)
-    assert y.dtype == jnp.bfloat16 and y.shape == (2, p.img_size[0], p.img_size[1], 3)
+    # models emit fp32: the output conv is an fp32 island regardless of knobs
+    assert y.dtype == jnp.float32 and y.shape == (2, p.img_size[0], p.img_size[1], 3)
     assert bool(jnp.isfinite(y).all())

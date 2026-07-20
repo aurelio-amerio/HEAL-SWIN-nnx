@@ -206,5 +206,6 @@ def test_healconv_param_dtype_propagates():
 
     x = jax.random.normal(jax.random.key(0), (2, p.npix, 3))
     y = model(x)
-    assert y.dtype == jnp.bfloat16 and y.shape == (2, p.npix, 5)
+    # models emit fp32: the output conv is an fp32 island regardless of knobs
+    assert y.dtype == jnp.float32 and y.shape == (2, p.npix, 5)
     assert bool(jnp.isfinite(y).all())
