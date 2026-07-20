@@ -76,9 +76,11 @@ class HealSwinParams:
         if len(self.depths) != len(self.num_heads):
             raise ValueError("depths (%d) and num_heads (%d) must have equal length"
                              % (len(self.depths), len(self.num_heads)))
-        if self.patch_size <= 0 or self.patch_size % 4 != 0:
-            raise ValueError("patch_size must be a positive multiple of 4 "
-                             "(valid nside in deeper layers), got %d" % self.patch_size)
+        ps = int(round(self.patch_size ** 0.5)) if self.patch_size > 0 else 0
+        if self.patch_size <= 0 or ps * ps != self.patch_size or ps & (ps - 1):
+            raise ValueError(
+                "patch_size must be a power of four (1 = no regrouping; the patched "
+                "grid needs an integer nside), got %d" % self.patch_size)
         s = int(round(self.window_size ** 0.5))
         if self.window_size <= 0 or s * s != self.window_size or s & (s - 1):
             raise ValueError(

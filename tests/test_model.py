@@ -70,6 +70,14 @@ def test_batch_independence():
     np.testing.assert_allclose(full[1:2], single, rtol=1e-4, atol=1e-4)
 
 
+def test_patch_size_one_forward_shape():
+    # patch_size=1: no regrouping, one pixel = one token at stage 0
+    model, p = tiny_hp(nside=8, patch_size=1)
+    model.eval()
+    x = jax.random.normal(jax.random.key(0), (1, p.npix, 3))
+    assert model(x).shape == (1, p.npix, 5)
+
+
 def test_remat_matches_no_remat():
     m1, p = tiny_hp()
     m2, _ = tiny_hp(use_checkpoint=True)

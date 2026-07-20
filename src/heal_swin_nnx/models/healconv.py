@@ -72,9 +72,11 @@ class HealConvParams:
                 "kernel_size must be a power of two >= 2: the k x k kernel spans a "
                 "nested quadtree window of k^2 pixels, so k must be in {2, 4, 8, ...} "
                 "(a 3x3 kernel is not expressible). Got %d" % self.kernel_size)
-        if self.patch_size <= 0 or self.patch_size % 4 != 0:
-            raise ValueError("patch_size must be a positive multiple of 4 "
-                             "(valid nside in deeper layers), got %d" % self.patch_size)
+        ps = int(round(self.patch_size ** 0.5)) if self.patch_size > 0 else 0
+        if self.patch_size <= 0 or ps * ps != self.patch_size or ps & (ps - 1):
+            raise ValueError(
+                "patch_size must be a power of four (1 = no regrouping; the patched "
+                "grid needs an integer nside), got %d" % self.patch_size)
         if self.nside <= 0 or self.nside & (self.nside - 1):
             raise ValueError("nside must be a power of two, got %d" % self.nside)
         if self.nside ** 2 % self.patch_size:

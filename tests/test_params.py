@@ -100,6 +100,19 @@ def test_nest_grid_shift_requires_window_sized_bottleneck():
                    shift_strategy="nest_grid_shift")
 
 
+def test_patch_size_must_be_power_of_four():
+    # powers of 4 keep the patched grid a HEALPix grid (integer nside);
+    # patch_size=1 means no regrouping: one pixel = one token
+    for ps in (1, 4, 16):
+        HealSwinParams(nside=16, in_channels=1, out_channels=1, patch_size=ps,
+                       depths=(2, 2), num_heads=(2, 4), embed_dim=16)
+    # multiples of 4 that are not powers of 4 (e.g. 8) give a non-integer nside
+    for ps in (0, -4, 3, 8, 12):
+        with pytest.raises(ValueError, match="patch_size"):
+            HealSwinParams(nside=16, in_channels=1, out_channels=1, patch_size=ps,
+                           depths=(2, 2), num_heads=(2, 4), embed_dim=16)
+
+
 def test_window_size_must_be_power_of_four():
     with pytest.raises(ValueError):
         HealSwinParams(nside=16, in_channels=1, out_channels=1, window_size=8)
@@ -194,8 +207,10 @@ def test_healconv_inherited_geometry_rules():
         HealConvParams(nside=32, in_channels=1, out_channels=1, base_pixels=[3, 2])
     with pytest.raises(ValueError):  # unknown shift strategy
         HealConvParams(nside=32, in_channels=1, out_channels=1, shift_strategy="roll")
-    with pytest.raises(ValueError):  # patch_size not a multiple of 4
+    with pytest.raises(ValueError):  # patch_size not a power of 4
         HealConvParams(nside=32, in_channels=1, out_channels=1, patch_size=3)
+    # patch_size=1 (no regrouping) is a valid power of 4
+    HealConvParams(nside=32, in_channels=1, out_channels=1, patch_size=1)
 
 
 def test_healconv_nest_grid_shift_requires_window_sized_bottleneck():
