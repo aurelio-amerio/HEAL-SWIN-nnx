@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from heal_swin_nnx.models.healconv import HealConvBlock, HealConvParams
+from heal_swin_nnx.models.healconv import HealConv, HealConvBlock, HealConvParams
+from heal_swin_nnx.variables import Buffer
 
 
 def tiny_conv_params(**over):
@@ -187,3 +188,23 @@ def test_conv_params_are_json_loggable_next_to_model():
     import dataclasses, json
     _, p = tiny_conv()
     json.dumps(dataclasses.asdict(p))
+
+
+def test_healconv_param_dtype_propagates():
+    p = tiny_conv_params(param_dtype="bfloat16")
+    model = HealConv(p, rngs=nnx.Rngs(0))
+    model.eval()
+    for path, v in nnx.to_flat_state(nnx.state(model, nnx.Param)):
+        assert v[...].dtype == jnp.bfloat16, path
+
+    ref = HealConv(tiny_conv_params(), rngs=nnx.Rngs(0))  # buffers ignore param_dtype
+    bufs = {"/".join(str(q) for q in path): v[...].dtype
+            for path, v in nnx.to_flat_state(nnx.state(model, Buffer))}
+    ref_bufs = {"/".join(str(q) for q in path): v[...].dtype
+                for path, v in nnx.to_flat_state(nnx.state(ref, Buffer))}
+    assert bufs == ref_bufs
+
+    x = jax.random.normal(jax.random.key(0), (2, p.npix, 3))
+    y = model(x)
+    assert y.dtype == jnp.bfloat16 and y.shape == (2, p.npix, 5)
+    assert bool(jnp.isfinite(y).all())
