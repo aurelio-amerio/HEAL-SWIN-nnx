@@ -24,6 +24,11 @@ A Flax NNX port of HEAL-SWIN — a HEALPix-native Swin Transformer U-Net — plu
 Public API (all in `src/heal_swin_nnx/__init__.py`): `HealSwin`/`HealSwinEncoder`/`HealSwinDecoder`/`HealSwinParams` (spherical), `SwinUnet`/`SwinEncoder`/`SwinDecoder`/`SwinParams` (flat grid), and `Buffer`.
 
 - `models/healswin.py` — the spherical model. `HealSwinParams` is a pure-data dataclass (JSON-serializable via `dataclasses.asdict`) that does all validation in `__post_init__`; new config knobs belong there, with a validation rule and a `test_params.py` case. Input/output is channels-last `(B, npix, C)` in NEST order over the selected base pixels.
+  Precision: `param_dtype` (storage, fp32 default) and `dtype` (compute, bf16
+  default) are independent knobs; norms/softmax/RoPE/final projections are
+  knob-independent fp32 islands and models always emit fp32 — see
+  `docs/superpowers/specs/2026-07-20-compute-dtype-design.md` before touching
+  any dtype or cast.
 - `models/swin.py` — the flat-grid counterpart, mirrored structure, `(B, H, W, C)`.
 - `hp/topology.py` — HEALPix face adjacency/orientation ground work (construction-time numpy). **Must never import healpy**: healpy is the independent ground truth the test suite checks against, so using it here would be circular. Per-pixel Python loops are fine in this module — only the model forward path is performance-critical.
 - `hp/shifting.py` — the four shift strategies (`nest_roll`, `nest_grid_shift`, `nest_grid_shift_exact`, `ring_shift`) as index permutations + attention masks.

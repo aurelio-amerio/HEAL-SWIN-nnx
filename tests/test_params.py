@@ -292,3 +292,10 @@ def test_dtype_rejects_float64_without_x64(mk):
 def test_precision_knobs_independent(mk):
     p = mk(param_dtype="bfloat16", dtype="float32")
     assert p.param_dtype == "bfloat16" and p.dtype == "float32"
+
+
+@pytest.mark.parametrize("mk", PARAMS_FACTORIES)
+def test_precision_defaults(mk):
+    p = mk()
+    assert p.dtype == "bfloat16"        # bf16 compute by default
+    assert p.param_dtype == "float32"   # fp32 master weights by default

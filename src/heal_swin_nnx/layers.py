@@ -79,7 +79,7 @@ class DropPath(nnx.Module):
 
 class Mlp(nnx.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0.0,
-                 param_dtype="float32", dtype="float32", *, rngs):
+                 param_dtype="float32", dtype="bfloat16", *, rngs):
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         self.fc1 = nnx.Linear(in_features, hidden_features, kernel_init=TRUNC_NORMAL,
@@ -140,7 +140,7 @@ def apply_rope(q, k, table):
 class PatchMerging(nnx.Module):
     """Merge 4 nested pixels into 1: (B, N, C) -> (B, N/4, dim_scale*C)."""
 
-    def __init__(self, dim, dim_scale=2, param_dtype="float32", dtype="float32", *, rngs):
+    def __init__(self, dim, dim_scale=2, param_dtype="float32", dtype="bfloat16", *, rngs):
         self.reduction = nnx.Linear(4 * dim, dim_scale * dim, use_bias=False,
                                     kernel_init=TRUNC_NORMAL, dtype=dtype,
                                     param_dtype=param_dtype, rngs=rngs)
@@ -158,7 +158,7 @@ class PatchMerging(nnx.Module):
 class PatchExpand(nnx.Module):
     """Expand 1 pixel into 4 nested pixels: (B, N, C) -> (B, 4N, C*dim_scale/4)."""
 
-    def __init__(self, dim, dim_scale=2, param_dtype="float32", dtype="float32", *, rngs):
+    def __init__(self, dim, dim_scale=2, param_dtype="float32", dtype="bfloat16", *, rngs):
         self.dtype = dtype
         self.expand = (nnx.Linear(dim, dim_scale * dim, use_bias=False,
                                   kernel_init=TRUNC_NORMAL, dtype=dtype,
@@ -179,7 +179,7 @@ class PatchExpand(nnx.Module):
 class FinalPatchExpand(nnx.Module):
     """Undo the patch embedding's downsampling: (B, N, C) -> (B, N*patch_size, C)."""
 
-    def __init__(self, patch_size, dim, param_dtype="float32", dtype="float32", *, rngs):
+    def __init__(self, patch_size, dim, param_dtype="float32", dtype="bfloat16", *, rngs):
         self.patch_size = patch_size
         self.expand = nnx.Linear(dim, patch_size * dim, use_bias=False,
                                  kernel_init=TRUNC_NORMAL, dtype=dtype,
@@ -200,7 +200,7 @@ class PatchEmbed(nnx.Module):
     """Non-overlapping 1D patch embedding over the nested pixel sequence."""
 
     def __init__(self, npix, patch_size, in_channels, embed_dim, norm=False,
-                 param_dtype="float32", dtype="float32", *, rngs):
+                 param_dtype="float32", dtype="bfloat16", *, rngs):
         self.npix = npix
         self.dtype = dtype
         self.num_patches = npix // patch_size

@@ -54,9 +54,9 @@ class HealConvParams:
 
     # precision
     param_dtype: str = "float32"     # parameter storage; any DTypeLike, stored as name
-    dtype: str = "float32"           # compute/matmul dtype; "float32" is a staging
-                                     # default — flipped to "bfloat16" in the final
-                                     # task of the compute-dtype plan
+    dtype: str = "bfloat16"          # compute/matmul dtype; fp32 islands (norms,
+                                     # softmax, RoPE, final projections) are
+                                     # knob-independent — see the compute-dtype spec
 
     def __post_init__(self):
         if self.base_pixels is None:
