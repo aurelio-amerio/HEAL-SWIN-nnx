@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "heal-swin-nnx"
-version = "0.1.0"
+version = "0.1.1"
 description = "HealSwin: spherical HEALPix Swin V2 U-Net in JAX/Flax NNX, with RoPE and seam-exact shifted windows"
 readme = "README.md"
 requires-python = ">=3.12"
