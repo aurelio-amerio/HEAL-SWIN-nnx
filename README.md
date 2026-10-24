@@ -149,11 +149,13 @@ on-device); build cost is host-side and unchanged.
 ## Multi-device training
 
 ```python
-from heal_swin_nnx.sharding import make_mesh, shard_model, shard_batch
+from heal_swin_nnx.sharding import make_mesh, shard_model, shard_batch, check_batch_divisible
 
 mesh = make_mesh()                       # axes ("data", "model"); make_mesh(model_axis=2) for tensor parallel
 shard_model(model, mesh, rule="replicated")
-batch = shard_batch(batch, mesh)         # batch size must be a multiple of batch_size_divisor(mesh)
+shard_model(optimizer, mesh, rule="replicated")   # same rule, so optimizer moments follow their params
+check_batch_divisible(batch, mesh, "train")       # clear error if batch size % batch_size_divisor(mesh)
+batch = shard_batch(batch, mesh)
 ```
 
 Models build without a mesh (`eager_sharding=False`); parameters carry logical
@@ -165,7 +167,7 @@ to replicated with one warning. If you add layers, annotate every `nnx.Param`
 with `axes(...)` or `partitioned(init, names)` from `heal_swin_nnx.sharding`.
 See `examples/mnist_healpix_classify_sharded.py` (rule via `HEALSWIN_SHARDING_RULE`).
 Tests run on 8 emulated CPU devices (`XLA_FLAGS=--xla_force_host_platform_device_count=8`,
-set by pytest-env); `sharding` tests skip with fewer than 8 devices.
+set by pytest-env); only tests marked `requires_8_devices` skip with fewer than 8 devices.
 
 ## Tests
 

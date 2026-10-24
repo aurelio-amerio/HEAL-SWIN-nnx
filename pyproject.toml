@@ -28,7 +28,7 @@ env = [
     "XLA_FLAGS=--xla_force_host_platform_device_count=8",
 ]
 markers = [
-    "sharding: multi-device sharding tests (need 8 devices)",
+    "sharding: multi-device sharding tests (those marked requires_8_devices skip with fewer than 8 devices)",
 ]
 
 [dependency-groups]
