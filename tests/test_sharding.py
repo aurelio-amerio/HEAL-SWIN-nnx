@@ -8,6 +8,7 @@ import pytest
 from flax import nnx
 from jax.sharding import AxisType, NamedSharding, PartitionSpec as P
 
+from heal_swin_nnx import HealSwin, HealSwinEncoder, HealSwinParams
 from heal_swin_nnx import sharding as sh
 from heal_swin_nnx.variables import Buffer
 
@@ -143,3 +144,44 @@ def test_check_batch_divisible_message():
         sh.check_batch_divisible((np.zeros((12, 4)),), mesh, "train")
     with pytest.raises(ValueError, match="differing leading sizes"):
         sh.check_batch_divisible((np.zeros((16, 4)), np.zeros((8,))), mesh, "train")
+
+
+def _tiny_params(**over):
+    kw = dict(nside=16, in_channels=3, out_channels=5, base_pixels=tuple(range(8)),
+              embed_dim=16, depths=(2, 2), num_heads=(2, 4), drop_path_rate=0.0)
+    kw.update(over)
+    return HealSwinParams(**kw)
+
+
+def assert_every_param_annotated(model):
+    for path, var in nnx.to_flat_state(nnx.state(model, nnx.Param)):
+        meta = var.get_metadata()
+        name = "/".join(map(str, path))
+        assert "out_sharding" in meta, f"{name} has no annotation"
+        assert meta["eager_sharding"] is False, name
+        names = meta["out_sharding"]
+        assert len(names) == var[...].ndim, f"{name}: rank {var[...].ndim} vs {names}"
+        assert set(n for n in names if n is not None) <= set(sh.LOGICAL_AXES), name
+        used = [n for n in names if n is not None]
+        assert len(used) == len(set(used)), f"{name}: repeated logical name in {names}"
+    for path, var in nnx.to_flat_state(nnx.state(model, Buffer)):
+        assert "out_sharding" not in var.get_metadata(), path
+
+
+@pytest.mark.parametrize("pos_embed", ["rope_mixed", "rel_bias", "rope_axial"])
+def test_every_healswin_param_annotated(pos_embed):
+    m = HealSwin(_tiny_params(pos_embed=pos_embed), rngs=nnx.Rngs(0))
+    assert_every_param_annotated(m)
+    first_kernel = next(v for p, v in nnx.to_flat_state(nnx.state(m, nnx.Param))
+                        if str(p[-1]) == "kernel")
+    assert isinstance(first_kernel[...].sharding, jax.sharding.SingleDeviceSharding)
+
+
+def test_healswin_values_unchanged_by_annotations():
+    # snapshot of the first kernel's statistics taken on the unannotated code
+    m = HealSwin(_tiny_params(), rngs=nnx.Rngs(0))
+    first_kernel = next(v for p, v in nnx.to_flat_state(nnx.state(m, nnx.Param))
+                        if str(p[-1]) == "kernel")
+    k = np.asarray(first_kernel[...], np.float32)
+    np.testing.assert_allclose(float(k.mean()), 0.000746572797652334, rtol=1e-6)
+    np.testing.assert_allclose(float(k.std()), 0.017588790506124496, rtol=1e-6)

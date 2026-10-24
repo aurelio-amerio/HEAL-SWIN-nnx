@@ -4,6 +4,8 @@ import jax.numpy as jnp
 from einops import rearrange
 from flax import nnx
 
+from heal_swin_nnx.sharding import axes
+
 # Distributional mirror of timm's trunc_normal_(std=0.02). (jax truncates at
 # +-2 sigma, timm at absolute +-2 — an init-distribution detail, not a
 # functional difference: only affects the tails of the initial parameter
@@ -83,9 +85,13 @@ class Mlp(nnx.Module):
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         self.fc1 = nnx.Linear(in_features, hidden_features, kernel_init=TRUNC_NORMAL,
-                              dtype=dtype, param_dtype=param_dtype, rngs=rngs)
+                              dtype=dtype, param_dtype=param_dtype, rngs=rngs,
+                              kernel_metadata=axes("embed", "mlp"),
+                              bias_metadata=axes("mlp"))
         self.fc2 = nnx.Linear(hidden_features, out_features, kernel_init=TRUNC_NORMAL,
-                              dtype=dtype, param_dtype=param_dtype, rngs=rngs)
+                              dtype=dtype, param_dtype=param_dtype, rngs=rngs,
+                              kernel_metadata=axes("mlp", "embed"),
+                              bias_metadata=axes("embed"))
         self.drop = nnx.Dropout(drop, rngs=rngs)
 
     def __call__(self, x):
@@ -143,10 +149,12 @@ class PatchMerging(nnx.Module):
     def __init__(self, dim, dim_scale=2, param_dtype="float32", dtype="bfloat16", *, rngs):
         self.reduction = nnx.Linear(4 * dim, dim_scale * dim, use_bias=False,
                                     kernel_init=TRUNC_NORMAL, dtype=dtype,
-                                    param_dtype=param_dtype, rngs=rngs)
+                                    param_dtype=param_dtype, rngs=rngs,
+                                    kernel_metadata=axes(None, "embed"))
         # fp32 island; output feeds `reduction` on the same line (self-healing)
         self.norm = nnx.LayerNorm(4 * dim, epsilon=LN_EPS, dtype=jnp.float32,
-                                  param_dtype=param_dtype, rngs=rngs)
+                                  param_dtype=param_dtype, rngs=rngs,
+                                  scale_metadata=axes(None), bias_metadata=axes(None))
 
     def __call__(self, x):
         B, N, C = x.shape
@@ -162,10 +170,12 @@ class PatchExpand(nnx.Module):
         self.dtype = dtype
         self.expand = (nnx.Linear(dim, dim_scale * dim, use_bias=False,
                                   kernel_init=TRUNC_NORMAL, dtype=dtype,
-                                  param_dtype=param_dtype, rngs=rngs)
+                                  param_dtype=param_dtype, rngs=rngs,
+                                  kernel_metadata=axes("embed", None))
                        if dim_scale != 1 else Identity())
         self.norm = nnx.LayerNorm(dim * dim_scale // 4, epsilon=LN_EPS,
-                                  dtype=jnp.float32, param_dtype=param_dtype, rngs=rngs)
+                                  dtype=jnp.float32, param_dtype=param_dtype, rngs=rngs,
+                                  scale_metadata=axes("embed"), bias_metadata=axes("embed"))
 
     def __call__(self, x):
         x = self.expand(x)
@@ -183,11 +193,13 @@ class FinalPatchExpand(nnx.Module):
         self.patch_size = patch_size
         self.expand = nnx.Linear(dim, patch_size * dim, use_bias=False,
                                  kernel_init=TRUNC_NORMAL, dtype=dtype,
-                                 param_dtype=param_dtype, rngs=rngs)
+                                 param_dtype=param_dtype, rngs=rngs,
+                                 kernel_metadata=axes("embed", None))
         # fp32 island with NO exit cast: sole consumer is the fp32 output conv
         # (deliberate fp32 tail — casting here would round right before it)
         self.norm = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
-                                  param_dtype=param_dtype, rngs=rngs)
+                                  param_dtype=param_dtype, rngs=rngs,
+                                  scale_metadata=axes("embed"), bias_metadata=axes("embed"))
 
     def __call__(self, x):
         x = self.expand(x)
@@ -207,9 +219,12 @@ class PatchEmbed(nnx.Module):
         self.proj = nnx.Conv(in_channels, embed_dim,
                              kernel_size=(patch_size,), strides=(patch_size,),
                              padding="VALID", dtype=dtype, param_dtype=param_dtype,
-                             rngs=rngs)
+                             rngs=rngs, kernel_metadata=axes(None, "in", "embed"),
+                             bias_metadata=axes("embed"))
         self.norm = (nnx.LayerNorm(embed_dim, epsilon=LN_EPS, dtype=jnp.float32,
-                                   param_dtype=param_dtype, rngs=rngs) if norm else None)
+                                   param_dtype=param_dtype, rngs=rngs,
+                                   scale_metadata=axes("embed"),
+                                   bias_metadata=axes("embed")) if norm else None)
 
     def __call__(self, x):  # (B, N, in_channels) channels-last
         assert x.shape[1] == self.npix, (
