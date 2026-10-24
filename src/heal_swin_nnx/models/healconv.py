@@ -20,6 +20,7 @@ from heal_swin_nnx.hp.windowing import get_nest_win_idcs, window_partition, wind
 from heal_swin_nnx.layers import (
     LN_EPS, TRUNC_NORMAL, DropPath, FinalPatchExpand, Identity, Mlp, PatchEmbed,
     PatchExpand, PatchMerging, canonical_float_dtype)
+from heal_swin_nnx.sharding import axes
 from heal_swin_nnx.variables import Buffer
 
 
@@ -159,12 +160,16 @@ class HealConvBlock(nnx.Module):
                                feature_group_count=dim, padding="SAME",
                                use_bias=params.conv_bias, kernel_init=TRUNC_NORMAL,
                                dtype=params.dtype, param_dtype=params.param_dtype,
-                               rngs=rngs)
+                               rngs=rngs,
+                               kernel_metadata=axes(None, None, None, "embed"),
+                               bias_metadata=axes("embed"))
         self.norm1 = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
-                                   param_dtype=params.param_dtype, rngs=rngs)
+                                   param_dtype=params.param_dtype, rngs=rngs,
+                                   scale_metadata=axes("embed"), bias_metadata=axes("embed"))
         self.drop_path = DropPath(drop_path, rngs=rngs) if drop_path > 0.0 else Identity()
         self.norm2 = nnx.LayerNorm(dim, epsilon=LN_EPS, dtype=jnp.float32,
-                                   param_dtype=params.param_dtype, rngs=rngs)
+                                   param_dtype=params.param_dtype, rngs=rngs,
+                                   scale_metadata=axes("embed"), bias_metadata=axes("embed"))
         self.mlp = Mlp(dim, int(dim * params.mlp_ratio), drop=params.drop_rate,
                        dtype=params.dtype, param_dtype=params.param_dtype, rngs=rngs)
 
@@ -301,7 +306,8 @@ class HealConvEncoder(nnx.Module):
                 downsample=i < self.num_layers - 1, rngs=rngs))
         self.layers = nnx.List(layers)
         self.norm = nnx.LayerNorm(self.num_features, epsilon=LN_EPS, dtype=jnp.float32,
-                                  param_dtype=params.param_dtype, rngs=rngs)
+                                  param_dtype=params.param_dtype, rngs=rngs,
+                                  scale_metadata=axes("embed"), bias_metadata=axes("embed"))
 
     def __call__(self, x):
         x = jnp.asarray(x, dtype=jnp.float32)
@@ -328,7 +334,9 @@ class HealConvDecoder(nnx.Module):
             dim = int(params.embed_dim * 2 ** down_idx)
             concat_back_dim.append(
                 nnx.Linear(2 * dim, dim, kernel_init=TRUNC_NORMAL, dtype=params.dtype,
-                           param_dtype=params.param_dtype, rngs=rngs)
+                           param_dtype=params.param_dtype, rngs=rngs,
+                           kernel_metadata=axes(None, "embed"),
+                           bias_metadata=axes("embed"))
                 if i_layer > 0 else Identity())
             if i_layer == 0:
                 layers_up.append(PatchExpand(dim=dim, dim_scale=2, dtype=params.dtype,
@@ -343,14 +351,16 @@ class HealConvDecoder(nnx.Module):
         self.layers_up = nnx.List(layers_up)
         self.concat_back_dim = nnx.List(concat_back_dim)
         self.norm_up = nnx.LayerNorm(params.embed_dim, epsilon=LN_EPS, dtype=jnp.float32,
-                                     param_dtype=params.param_dtype, rngs=rngs)
+                                     param_dtype=params.param_dtype, rngs=rngs,
+                                     scale_metadata=axes("embed"), bias_metadata=axes("embed"))
         self.up = FinalPatchExpand(patch_size=params.patch_size, dim=params.embed_dim,
                                    dtype=params.dtype,
                                    param_dtype=params.param_dtype, rngs=rngs)
         # emit-fp32 endpoint: constructed fp32 (never a post-hoc astype)
         self.output = nnx.Conv(params.embed_dim, params.out_channels, kernel_size=(1,),
                                use_bias=False, dtype=jnp.float32,
-                               param_dtype=params.param_dtype, rngs=rngs)
+                               param_dtype=params.param_dtype, rngs=rngs,
+                               kernel_metadata=axes(None, "embed", "out"))
 
     def __call__(self, x, skips):
         for inx, layer_up in enumerate(self.layers_up):

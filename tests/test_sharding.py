@@ -8,7 +8,8 @@ import pytest
 from flax import nnx
 from jax.sharding import AxisType, NamedSharding, PartitionSpec as P
 
-from heal_swin_nnx import HealSwin, HealSwinEncoder, HealSwinParams
+from heal_swin_nnx import (HealConv, HealConvParams, HealSwin, HealSwinEncoder,
+                           HealSwinParams, SwinParams, SwinUnet)
 from heal_swin_nnx import sharding as sh
 from heal_swin_nnx.variables import Buffer
 
@@ -185,3 +186,22 @@ def test_healswin_values_unchanged_by_annotations():
     k = np.asarray(first_kernel[...], np.float32)
     np.testing.assert_allclose(float(k.mean()), 0.000746572797652334, rtol=1e-6)
     np.testing.assert_allclose(float(k.std()), 0.017588790506124496, rtol=1e-6)
+
+
+@pytest.mark.parametrize("pos_embed", ["none", "rel_bias", "rope_axial", "rope_mixed"])
+def test_every_swin_param_annotated(pos_embed):
+    m = SwinUnet(SwinParams(img_size=(32, 64), in_channels=2, out_channels=3,
+                            embed_dim=16, depths=(2, 2), num_heads=(2, 4),
+                            drop_path_rate=0.0, pos_embed=pos_embed),
+                 rngs=nnx.Rngs(0))
+    assert_every_param_annotated(m)
+
+
+@pytest.mark.parametrize("conv_bias", [True, False])
+def test_every_healconv_param_annotated(conv_bias):
+    m = HealConv(HealConvParams(nside=16, in_channels=3, out_channels=5,
+                                base_pixels=tuple(range(8)), embed_dim=16,
+                                depths=(2, 2), drop_path_rate=0.0,
+                                conv_bias=conv_bias),
+                 rngs=nnx.Rngs(0))
+    assert_every_param_annotated(m)
