@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "heal-swin-nnx"
-version = "0.1.1"
+version = "0.1.2"
 description = "HealSwin: spherical HEALPix Swin V2 U-Net in JAX/Flax NNX, with RoPE and seam-exact shifted windows"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,7 +12,7 @@ dependencies = [
     "einops>=0.8.2",
     "flax>=0.12.7",
     "healpy>=1.19.0",
-    "jax>=0.10.2",
+    "jax>=0.11.1",
     "numpy>=2.5.1",
 ]
 
@@ -24,7 +24,11 @@ Issues = "https://github.com/aurelio-amerio/HEAL-SWIN-nnx/issues"
 testpaths = ["tests"]
 addopts = "-n 2"
 env = [
-    "JAX_PLATFORMS=cpu"
+    "JAX_PLATFORMS=cpu",
+    "XLA_FLAGS=--xla_force_host_platform_device_count=8",
+]
+markers = [
+    "sharding: multi-device sharding tests (need 8 devices)",
 ]
 
 [dependency-groups]
@@ -44,10 +48,10 @@ examples = [
 ]
 
 cuda12 = [
-    "jax[cuda12]>=0.10.2",
+    "jax[cuda12]>=0.11.1",
     "nvidia-cudnn-cu12<9.11.0",
 ]
 
 cuda13 = [
-    "jax[cuda13]>=0.10.2"
+    "jax[cuda13]>=0.11.1"
 ]
