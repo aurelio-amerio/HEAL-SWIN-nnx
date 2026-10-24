@@ -211,7 +211,8 @@ def assert_every_param_annotated(model):
 
 @pytest.mark.parametrize("pos_embed", ["rope_mixed", "rel_bias", "rope_axial"])
 def test_every_healswin_param_annotated(pos_embed):
-    m = HealSwin(_tiny_params(pos_embed=pos_embed), rngs=nnx.Rngs(0))
+    m = HealSwin(_tiny_params(pos_embed=pos_embed, patch_embed_norm=(pos_embed == "rope_axial")),
+                 rngs=nnx.Rngs(0))
     assert_every_param_annotated(m)
     first_kernel = next(v for p, v in nnx.to_flat_state(nnx.state(m, nnx.Param))
                         if str(p[-1]) == "kernel")
@@ -232,7 +233,8 @@ def test_healswin_values_unchanged_by_annotations():
 def test_every_swin_param_annotated(pos_embed):
     m = SwinUnet(SwinParams(img_size=(32, 64), in_channels=2, out_channels=3,
                             embed_dim=16, depths=(2, 2), num_heads=(2, 4),
-                            drop_path_rate=0.0, pos_embed=pos_embed),
+                            drop_path_rate=0.0, pos_embed=pos_embed,
+                            patch_embed_norm=(pos_embed == "rope_axial")),
                  rngs=nnx.Rngs(0))
     assert_every_param_annotated(m)
 
@@ -242,7 +244,7 @@ def test_every_healconv_param_annotated(conv_bias):
     m = HealConv(HealConvParams(nside=16, in_channels=3, out_channels=5,
                                 base_pixels=tuple(range(8)), embed_dim=16,
                                 depths=(2, 2), drop_path_rate=0.0,
-                                conv_bias=conv_bias),
+                                conv_bias=conv_bias, patch_embed_norm=conv_bias),
                  rngs=nnx.Rngs(0))
     assert_every_param_annotated(m)
 
@@ -260,46 +262,38 @@ def _params_allclose(a, b, **tol):
 
 _experimental = pytest.mark.filterwarnings("ignore:sharding rule")
 
-# Sharding the batch changes XLA's CPU reduction/tiling order: fp32 forwards differ by ~1e-4
-# (measured max abs 1.6e-4 fwd, 3.3e-4 with dropout, 1.2e-4 tensor; output scale ~3.5).
-# A real placement bug gives O(1) differences, so 2e-3 still discriminates.
+# Reference for batch-sharded forwards: the unsharded model jitted on per-device batch slices. With
+# replicated/fsdp rules each device runs exactly that program, so the match is bit-exact (measured max
+# abs diff 0.0 at fp32 and bf16, output scale ~3.5); EXACT_TOL only leaves room for other backends.
+EXACT_TOL = dict(rtol=1e-5, atol=1e-5)
+# Full-batch references differ from sharded runs by XLA's CPU reduction/tiling order (measured max abs
+# 3.3e-4 train mode with dropout, 1.2e-4 tensor rule; output scale ~3.5). A real placement bug gives
+# O(1) differences, so 2e-3 still discriminates. Train mode cannot use the per-slice reference: dropout
+# and DropPath masks are drawn over the global batch shape, so slicing changes the draws (measured
+# diff 6.2 between sharded and per-slice train-mode outputs).
 FWD_TOL = dict(rtol=2e-3, atol=2e-3)
+
+
+def _per_slice_forward(model, x, n=8):
+    """Unsharded model applied to each of ``n`` equal batch slices, concatenated."""
+    fwd = nnx.jit(lambda m, x: m(x))
+    b = x.shape[0] // n
+    return np.concatenate([np.asarray(fwd(model, x[i * b:(i + 1) * b]), np.float32) for i in range(n)])
 
 
 @requires_8_devices
 @_experimental
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("rule", ["replicated", "fsdp"])
-def test_forward_matches_unsharded(rule):
-    p = _tiny_params(dtype="float32")                      # fp32 compute -> tight tolerance
+def test_forward_matches_unsharded(rule, dtype):
+    p = _tiny_params(dtype=dtype)
     ref = HealSwin(p, rngs=nnx.Rngs(0)); ref.eval()
     m = HealSwin(p, rngs=nnx.Rngs(0)); m.eval()
     mesh = sh.make_mesh(); sh.shard_model(m, mesh, rule)
     x = _batch(16, p, jax.random.key(1))
-    y_ref = nnx.jit(lambda m, x: m(x))(ref, x)
     y = nnx.jit(lambda m, x: m(x))(m, sh.shard_batch(x, mesh))
     assert y.sharding.is_equivalent_to(NamedSharding(mesh, P("data")), y.ndim)
-    np.testing.assert_allclose(np.asarray(y), np.asarray(y_ref), **FWD_TOL)
-
-
-@requires_8_devices
-@_experimental
-def test_forward_matches_unsharded_bf16():
-    # bf16 compute is noisy on its own (unsharded bf16 vs fp32: rms 0.081, max 3.2 on output rms 0.97),
-    # so a sharded-vs-unsharded allclose is meaningless. Instead the sharded model must be about as
-    # close to the fp32 truth as the unsharded bf16 model is (measured ratio 1.11).
-    p = _tiny_params()                                     # default dtype="bfloat16"
-    fwd = nnx.jit(lambda m, x: m(x))
-    truth = HealSwin(_tiny_params(dtype="float32"), rngs=nnx.Rngs(0)); truth.eval()
-    ref = HealSwin(p, rngs=nnx.Rngs(0)); ref.eval()
-    m = HealSwin(p, rngs=nnx.Rngs(0)); m.eval()
-    mesh = sh.make_mesh(); sh.shard_model(m, mesh, "fsdp")
-    x = _batch(16, p, jax.random.key(1))
-    y_true = np.asarray(fwd(truth, x))
-    rms = lambda d: float(np.sqrt(np.mean(np.square(d))))
-    err_ref = rms(np.asarray(fwd(ref, x), np.float32) - y_true)
-    err = rms(np.asarray(fwd(m, sh.shard_batch(x, mesh)), np.float32) - y_true)
-    assert err_ref < 0.2 * rms(y_true)
-    assert err <= 1.5 * err_ref, (err, err_ref)
+    np.testing.assert_allclose(np.asarray(y, np.float32), _per_slice_forward(ref, x), **EXACT_TOL)
 
 
 @requires_8_devices
@@ -357,10 +351,21 @@ def test_one_gradient_step_matches_unsharded(rule):
 @requires_8_devices
 @_experimental
 def test_encoder_standalone_fsdp():
-    p = _tiny_params(); enc = HealSwinEncoder(p, rngs=nnx.Rngs(0)); enc.eval()
+    p = _tiny_params()
+    enc = HealSwinEncoder(p, rngs=nnx.Rngs(0)); enc.eval()
+    ref = HealSwinEncoder(p, rngs=nnx.Rngs(0)); ref.eval()
     mesh = sh.make_mesh(); sh.shard_model(enc, mesh, "fsdp")
-    tokens, skips = nnx.jit(lambda m, x: m(x))(enc, sh.shard_batch(_batch(8, p, jax.random.key(0)), mesh))
-    assert tokens.sharding.is_equivalent_to(NamedSharding(mesh, P("data")), tokens.ndim)
+    x = _batch(8, p, jax.random.key(0))
+    fwd = nnx.jit(lambda m, x: m(x))
+    tokens, skips = fwd(enc, sh.shard_batch(x, mesh))
+    data = NamedSharding(mesh, P("data"))
+    assert tokens.sharding.is_equivalent_to(data, tokens.ndim)
+    assert skips and all(sk.sharding.is_equivalent_to(data, sk.ndim) for sk in skips)
+    outs = [fwd(ref, x[i:i + 1]) for i in range(8)]       # per-device slice reference (measured diff 0.0)
+    np.testing.assert_allclose(np.asarray(tokens), np.concatenate([np.asarray(t) for t, _ in outs]), **EXACT_TOL)
+    for k, sk in enumerate(skips):
+        np.testing.assert_allclose(np.asarray(sk, np.float32),
+                                   np.concatenate([np.asarray(sks[k], np.float32) for _, sks in outs]), **EXACT_TOL)
 
 
 @requires_8_devices
@@ -373,13 +378,14 @@ def test_tensor_rule_smoke_4x2():
     assert s[k].is_equivalent_to(NamedSharding(mesh, P(None, "model")), 2)
     x = _batch(8, p, jax.random.key(1))
     y = nnx.jit(lambda m, x: m(x))(m, sh.shard_batch(x, mesh))
+    assert y.sharding.is_equivalent_to(NamedSharding(mesh, P("data")), y.ndim)   # batch axes of 4x2 = ("data",)
     np.testing.assert_allclose(np.asarray(y), np.asarray(nnx.jit(lambda m, x: m(x))(ref, x)), **FWD_TOL)
 
 
 @requires_8_devices
-def test_sharded_example_smoke_runs_two_steps():
+def test_sharded_example_smoke_runs_two_steps(monkeypatch):
     pytest.importorskip("grain"); pytest.importorskip("datasets")
-    sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "examples"))
+    monkeypatch.syspath_prepend(str(pathlib.Path(__file__).parents[1] / "examples"))
     ex = importlib.import_module("mnist_healpix_classify_sharded")
     loss = ex.smoke(sh.make_mesh())
     assert np.isfinite(loss)
