@@ -1,3 +1,6 @@
+import importlib
+import pathlib
+import sys
 import warnings
 
 import jax
@@ -334,3 +337,12 @@ def test_tensor_rule_smoke_4x2():
     x = _batch(8, p, jax.random.key(1))
     y = nnx.jit(lambda m, x: m(x))(m, sh.shard_batch(x, mesh))
     np.testing.assert_allclose(np.asarray(y), np.asarray(nnx.jit(lambda m, x: m(x))(ref, x)), **FWD_TOL)
+
+
+@requires_8_devices
+def test_sharded_example_smoke_runs_two_steps():
+    pytest.importorskip("grain"); pytest.importorskip("datasets")
+    sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "examples"))
+    ex = importlib.import_module("mnist_healpix_classify_sharded")
+    loss = ex.smoke(sh.make_mesh())
+    assert np.isfinite(loss)
