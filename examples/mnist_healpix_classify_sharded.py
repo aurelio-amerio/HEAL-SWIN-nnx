@@ -36,7 +36,6 @@ import sys
 if __name__ != "__main__":
     os.environ["JAX_PLATFORMS"] = "cpu"
 
-import math
 import time
 
 import jax
@@ -50,7 +49,7 @@ from absl import flags
 import grain
 
 from heal_swin_nnx import HealSwinEncoder, HealSwinParams
-from heal_swin_nnx.sharding import check_batch_divisible, make_mesh, shard_batch, shard_model
+from heal_swin_nnx.sharding import axes, check_batch_divisible, make_mesh, shard_batch, shard_model
 from mnist_healpix_dataset import make_mnist_healpix_dataset
 
 # grain's mp_prefetch reads absl flags (e.g. --grain_enable_multiprocess_worker_
@@ -77,7 +76,7 @@ WINDOW_SIZE = 16  # 4x4 windows; max allowed by the 4x4-per-face bottleneck of t
 NUM_WORKERS = min(8, max(1, (os.cpu_count() or 2) - 2))
 SEED = 0
 RULE = os.environ.get("HEALSWIN_SHARDING_RULE", "replicated")  # replicated | fsdp | tensor
-RESULTS_FILE = os.path.join(os.path.dirname(__file__), "mnist_healpix_classify_results.txt")
+RESULTS_FILE = os.path.join(os.path.dirname(__file__), "mnist_healpix_classify_sharded_results.txt")
 # ------------------------------------------------------------------------
 
 
@@ -86,7 +85,8 @@ class HealSwinClassifier(nnx.Module):
 
     def __init__(self, params: HealSwinParams, num_classes: int, *, rngs: nnx.Rngs):
         self.encoder = HealSwinEncoder(params, rngs=rngs)
-        self.head = nnx.Linear(self.encoder.num_features, num_classes, rngs=rngs)
+        self.head = nnx.Linear(self.encoder.num_features, num_classes, rngs=rngs,
+                               kernel_metadata=axes("embed", "out"), bias_metadata=axes("out"))
 
     def __call__(self, x):  # x: (B, npix, in_channels)
         tokens, _skips = self.encoder(x)          # (B, N_bottleneck, D)
@@ -125,8 +125,8 @@ def make_loader(ds, batch_size, num_workers, shuffle_seed=None):
 
 def to_model_inputs(batch, mesh):
     """grain numpy batch -> (images (B, npix, 1) float32, labels (B,) int32), sharded over the mesh."""
-    images = jnp.asarray(batch["image"], dtype=jnp.float32)[..., None]
-    labels = jnp.asarray(batch["label"], dtype=jnp.int32)
+    images = np.asarray(batch["image"], dtype=np.float32)[..., None]
+    labels = np.asarray(batch["label"], dtype=np.int32)
     return shard_batch((images, labels), mesh)
 
 
@@ -176,7 +176,7 @@ def main():
     train_ds = make_mnist_healpix_dataset(TRAIN_SAMPLES, nside=NSIDE, split="train", seed=SEED)
     test_ds = make_mnist_healpix_dataset(TEST_SAMPLES, nside=NSIDE, split="test", seed=SEED + 1)
 
-    steps_per_epoch = math.ceil(TRAIN_SAMPLES / BATCH_SIZE)
+    steps_per_epoch = TRAIN_SAMPLES // BATCH_SIZE
     total_steps = steps_per_epoch * EPOCHS
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0, peak_value=PEAK_LR,
