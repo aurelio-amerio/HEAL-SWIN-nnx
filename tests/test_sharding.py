@@ -1,6 +1,5 @@
 import importlib
 import pathlib
-import sys
 import warnings
 
 import jax
@@ -64,6 +63,19 @@ def test_make_mesh_shape_and_axis_types():
 
 
 @requires_8_devices
+def test_make_mesh_accepts_device_array_and_rejects_bad_model_axis():
+    grid = np.asarray(jax.devices()).reshape(2, 4)       # e.g. mesh_utils.create_device_mesh output
+    assert dict(sh.make_mesh(grid.ravel()).shape) == {"data": 8, "model": 1}
+    assert dict(sh.make_mesh(grid.ravel(), model_axis=4).shape) == {"data": 2, "model": 4}
+    assert dict(sh.make_mesh(list(jax.devices())[:4]).shape) == {"data": 4, "model": 1}
+    with pytest.raises(ValueError, match="positive divisor"):
+        sh.make_mesh(model_axis=0)
+    with pytest.raises(ValueError, match="positive divisor"):
+        sh.make_mesh(model_axis=-2)
+    assert sh.make_mesh([]).devices.size == 0             # an explicit empty list is not "all devices"
+
+
+@requires_8_devices
 def test_shard_model_replicated_places_everything():
     m = Toy(nnx.Rngs(0)); mesh = sh.make_mesh()
     with warnings.catch_warnings():
@@ -123,6 +135,22 @@ def test_shard_model_tensor_shards_mlp_over_model_axis():
     assert sh.sharding_of(m)["l1/kernel"].is_equivalent_to(NamedSharding(mesh, P(None, "model")), 2)
 
 
+@requires_8_devices
+def test_shard_model_fsdp_rank_mismatch_falls_back_both_ways():
+    class Mismatch(nnx.Module):
+        def __init__(self):
+            self.short = nnx.Param(jnp.ones((8, 8)), **sh.axes("embed"))                 # annotation shorter than rank
+            self.long = nnx.Param(jnp.ones((8,)), **sh.axes("embed", "mlp"))             # annotation longer than rank
+    m = Mismatch(); mesh = sh.make_mesh()
+    with pytest.warns(UserWarning) as rec:
+        sh.shard_model(m, mesh, "fsdp")
+    fb = [str(w.message) for w in rec if "fallback" in str(w.message)]
+    assert len(fb) == 1 and "short" in fb[0] and "long" in fb[0] and "rank" in fb[0]
+    s = sh.sharding_of(m)
+    assert s["short"].is_equivalent_to(NamedSharding(mesh, P()), 2)
+    assert s["long"].is_equivalent_to(NamedSharding(mesh, P()), 1)
+
+
 def test_shard_model_rejects_unknown_rule():
     with pytest.raises(ValueError):
         sh.shard_model(Toy(nnx.Rngs(0)), sh.make_mesh(), "nope")
@@ -148,6 +176,15 @@ def test_check_batch_divisible_message():
         sh.check_batch_divisible((np.zeros((12, 4)),), mesh, "train")
     with pytest.raises(ValueError, match="differing leading sizes"):
         sh.check_batch_divisible((np.zeros((16, 4)), np.zeros((8,))), mesh, "train")
+
+
+@requires_8_devices
+def test_check_batch_divisible_ignores_zero_d_leaves():
+    mesh = sh.make_mesh()
+    sh.check_batch_divisible({"x": np.zeros((16, 4)), "step": np.array(3), "s": jnp.float32(1)}, mesh, "train")
+    sh.check_batch_divisible({"step": np.array(3)}, mesh, "train")            # only 0-d leaves: nothing to check
+    with pytest.raises(ValueError, match="batch size 12 is not divisible"):
+        sh.check_batch_divisible({"x": np.zeros((12, 4)), "step": np.array(3)}, mesh, "train")
 
 
 def _tiny_params(**over):

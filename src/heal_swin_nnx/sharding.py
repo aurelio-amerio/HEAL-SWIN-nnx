@@ -1,7 +1,11 @@
 """Multi-device sharding helpers: logical axis names, rule tables, mesh and placement.
 
-Cross-repo contract: GenSBI holds a verbatim copy of ``LOGICAL_AXES``, ``RULES``,
-``MODEL_AXIS``, ``axes``, ``partitioned`` and ``make_mesh``. Keep them in sync.
+Cross-repo contract: GenSBI's ``sharding.py`` holds the same ``LOGICAL_AXES``,
+``RULES`` and ``MODEL_AXIS`` values and the same ``axes``/``partitioned`` bodies
+(byte-identical code; docstrings differ). ``make_mesh``, ``batch_axes``,
+``batch_size_divisor``, ``shard_model``, ``shard_batch``, ``check_batch_divisible``
+and ``sharding_of`` share semantics (including warning and error conditions) but
+not text. Change both files together.
 
 Models annotate parameters with *logical* axis names (``axes("embed", "mlp")``)
 and stay mesh-free at construction (``eager_sharding=False``). A mesh and a rule
@@ -35,10 +39,10 @@ def partitioned(init, names: tuple[str | None, ...]):
 
 def make_mesh(devices=None, model_axis: int = 1) -> jax.sharding.Mesh:
     """Mesh with axes ("data", "model"); ``data = len(devices) // model_axis``."""
-    devices = devices or jax.devices()
-    if len(devices) % model_axis:
+    devices = list(jax.devices() if devices is None else devices)
+    if model_axis < 1 or len(devices) % model_axis:
         raise ValueError(
-            f"{len(devices)} devices are not divisible by model_axis={model_axis}")
+            f"model_axis={model_axis} must be a positive divisor of the device count {len(devices)}.")
     return jax.sharding.Mesh(
         np.asarray(devices).reshape(len(devices) // model_axis, model_axis),
         ("data", MODEL_AXIS), axis_types=(AxisType.Auto, AxisType.Auto))
@@ -60,8 +64,8 @@ def _spec_for(var, rule_map, mesh):
     if names is None:
         reason = "no annotation" if isinstance(var, nnx.Param) else None
         return P(), reason
-    if len(names) > np.ndim(value):
-        return P(), f"annotation {tuple(names)} has more entries than array rank {np.ndim(value)}"
+    if len(names) != np.ndim(value):
+        return P(), f"annotation rank {len(names)} != array rank {np.ndim(value)}"
     mapped = []
     for name, dim in zip(names, np.shape(value)):
         if name is None:
@@ -120,7 +124,7 @@ def shard_batch(batch, mesh):
 
 def check_batch_divisible(batch, mesh, what: str) -> None:
     sizes = [x.shape[0] for x in jax.tree.leaves(batch)
-             if isinstance(x, (np.ndarray, jax.Array))]
+             if isinstance(x, (np.ndarray, jax.Array)) and x.ndim > 0]
     if not sizes:
         return
     if len(set(sizes)) > 1:
