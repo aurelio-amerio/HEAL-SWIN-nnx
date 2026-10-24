@@ -205,3 +205,132 @@ def test_every_healconv_param_annotated(conv_bias):
                                 conv_bias=conv_bias),
                  rngs=nnx.Rngs(0))
     assert_every_param_annotated(m)
+
+
+def _batch(B, p, key):
+    return jax.random.normal(key, (B, p.npix, p.in_channels), jnp.float32)
+
+
+def _params_allclose(a, b, **tol):
+    fa = nnx.to_flat_state(nnx.state(a, nnx.Param)); fb = nnx.to_flat_state(nnx.state(b, nnx.Param))
+    for (pa, va), (pb, vb) in zip(fa, fb):
+        assert pa == pb
+        np.testing.assert_allclose(np.asarray(vb[...]), np.asarray(va[...]), err_msg=str(pa), **tol)
+
+
+_experimental = pytest.mark.filterwarnings("ignore:sharding rule")
+
+# Sharding the batch changes XLA's CPU reduction/tiling order: fp32 forwards differ by ~1e-4
+# (measured max abs 1.6e-4 fwd, 3.3e-4 with dropout, 1.2e-4 tensor; output scale ~3.5).
+# A real placement bug gives O(1) differences, so 2e-3 still discriminates.
+FWD_TOL = dict(rtol=2e-3, atol=2e-3)
+
+
+@requires_8_devices
+@_experimental
+@pytest.mark.parametrize("rule", ["replicated", "fsdp"])
+def test_forward_matches_unsharded(rule):
+    p = _tiny_params(dtype="float32")                      # fp32 compute -> tight tolerance
+    ref = HealSwin(p, rngs=nnx.Rngs(0)); ref.eval()
+    m = HealSwin(p, rngs=nnx.Rngs(0)); m.eval()
+    mesh = sh.make_mesh(); sh.shard_model(m, mesh, rule)
+    x = _batch(16, p, jax.random.key(1))
+    y_ref = nnx.jit(lambda m, x: m(x))(ref, x)
+    y = nnx.jit(lambda m, x: m(x))(m, sh.shard_batch(x, mesh))
+    assert y.sharding.is_equivalent_to(NamedSharding(mesh, P("data")), y.ndim)
+    np.testing.assert_allclose(np.asarray(y), np.asarray(y_ref), **FWD_TOL)
+
+
+@requires_8_devices
+@_experimental
+def test_forward_matches_unsharded_bf16():
+    # bf16 compute is noisy on its own (unsharded bf16 vs fp32: rms 0.081, max 3.2 on output rms 0.97),
+    # so a sharded-vs-unsharded allclose is meaningless. Instead the sharded model must be about as
+    # close to the fp32 truth as the unsharded bf16 model is (measured ratio 1.11).
+    p = _tiny_params()                                     # default dtype="bfloat16"
+    fwd = nnx.jit(lambda m, x: m(x))
+    truth = HealSwin(_tiny_params(dtype="float32"), rngs=nnx.Rngs(0)); truth.eval()
+    ref = HealSwin(p, rngs=nnx.Rngs(0)); ref.eval()
+    m = HealSwin(p, rngs=nnx.Rngs(0)); m.eval()
+    mesh = sh.make_mesh(); sh.shard_model(m, mesh, "fsdp")
+    x = _batch(16, p, jax.random.key(1))
+    y_true = np.asarray(fwd(truth, x))
+    rms = lambda d: float(np.sqrt(np.mean(np.square(d))))
+    err_ref = rms(np.asarray(fwd(ref, x), np.float32) - y_true)
+    err = rms(np.asarray(fwd(m, sh.shard_batch(x, mesh)), np.float32) - y_true)
+    assert err_ref < 0.2 * rms(y_true)
+    assert err <= 1.5 * err_ref, (err, err_ref)
+
+
+@requires_8_devices
+def test_train_mode_forward_matches_unsharded():
+    # active Dropout + DropPath: the per-sample masks must agree for the same RNG state
+    p = _tiny_params(dtype="float32", drop_rate=0.2, drop_path_rate=0.2)
+    ref = HealSwin(p, rngs=nnx.Rngs(0)); ref.train()
+    m = HealSwin(p, rngs=nnx.Rngs(0)); m.train()
+    mesh = sh.make_mesh(); sh.shard_model(m, mesh, "replicated")
+    x = _batch(16, p, jax.random.key(1))
+    y_ref = nnx.jit(lambda m, x: m(x))(ref, x)
+    y = nnx.jit(lambda m, x: m(x))(m, sh.shard_batch(x, mesh))
+    np.testing.assert_allclose(np.asarray(y), np.asarray(y_ref), **FWD_TOL)
+
+
+@requires_8_devices
+@_experimental
+def test_fsdp_places_qkv_and_mlp_kernels_over_data_and_buffers_replicated():
+    p = _tiny_params(); m = HealSwin(p, rngs=nnx.Rngs(0)); mesh = sh.make_mesh()
+    sh.shard_model(m, mesh, "fsdp")
+    s = sh.sharding_of(m)
+    qkv = [k for k in s if k.endswith("qkv/kernel")]; fc1 = [k for k in s if k.endswith("fc1/kernel")]
+    assert qkv and fc1
+    for k in qkv + fc1:
+        assert s[k].is_equivalent_to(NamedSharding(mesh, P("data", None)), 2), k
+    bufs = {"/".join(map(str, pth)): v[...].ndim for pth, v in nnx.to_flat_state(nnx.state(m, Buffer))}
+    assert bufs
+    for k, nd in bufs.items():
+        assert s[k].is_equivalent_to(NamedSharding(mesh, P()), nd), k
+
+
+@requires_8_devices
+@_experimental
+@pytest.mark.parametrize("rule", ["replicated", "fsdp"])
+def test_one_gradient_step_matches_unsharded(rule):
+    p = _tiny_params(dtype="float32")
+    def make():
+        m = HealSwin(p, rngs=nnx.Rngs(0)); m.train()
+        return m, nnx.Optimizer(m, optax.adamw(1e-3), wrt=nnx.Param)
+    ref, opt_ref = make(); m, opt = make()
+    mesh = sh.make_mesh(); sh.shard_model(m, mesh, rule); sh.shard_model(opt, mesh, rule)
+    x = _batch(16, p, jax.random.key(1))
+    @nnx.jit
+    def step(model, opt, x):
+        loss, g = nnx.value_and_grad(lambda mm: (mm(x) ** 2).mean())(model)
+        opt.update(model, g); return loss
+    l_ref = step(ref, opt_ref, x); l = step(m, opt, sh.shard_batch(x, mesh))
+    np.testing.assert_allclose(float(l), float(l_ref), rtol=1e-5)
+    _params_allclose(ref, m, rtol=1e-4, atol=1e-6)
+    if rule == "fsdp":   # optimizer moments keep the data sharding after the step
+        mu = [v for pth, v in nnx.to_flat_state(nnx.state(opt)) if "mu" in map(str, pth) and v[...].ndim == 2]
+        assert mu and any(v[...].sharding.is_equivalent_to(NamedSharding(mesh, P("data", None)), 2) for v in mu)
+
+
+@requires_8_devices
+@_experimental
+def test_encoder_standalone_fsdp():
+    p = _tiny_params(); enc = HealSwinEncoder(p, rngs=nnx.Rngs(0)); enc.eval()
+    mesh = sh.make_mesh(); sh.shard_model(enc, mesh, "fsdp")
+    tokens, skips = nnx.jit(lambda m, x: m(x))(enc, sh.shard_batch(_batch(8, p, jax.random.key(0)), mesh))
+    assert tokens.sharding.is_equivalent_to(NamedSharding(mesh, P("data")), tokens.ndim)
+
+
+@requires_8_devices
+@_experimental
+def test_tensor_rule_smoke_4x2():
+    p = _tiny_params(dtype="float32")
+    ref = HealSwin(p, rngs=nnx.Rngs(0)); ref.eval(); m = HealSwin(p, rngs=nnx.Rngs(0)); m.eval()
+    mesh = sh.make_mesh(model_axis=2); sh.shard_model(m, mesh, "tensor")
+    s = sh.sharding_of(m); k = next(k for k in s if k.endswith("fc1/kernel"))
+    assert s[k].is_equivalent_to(NamedSharding(mesh, P(None, "model")), 2)
+    x = _batch(8, p, jax.random.key(1))
+    y = nnx.jit(lambda m, x: m(x))(m, sh.shard_batch(x, mesh))
+    np.testing.assert_allclose(np.asarray(y), np.asarray(nnx.jit(lambda m, x: m(x))(ref, x)), **FWD_TOL)
