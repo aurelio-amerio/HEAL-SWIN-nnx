@@ -146,6 +146,27 @@ Takeaways:
 On GPU the run-time gaps shrink further (gather/scatter and roll are all cheap
 on-device); build cost is host-side and unchanged.
 
+## Multi-device training
+
+```python
+from heal_swin_nnx.sharding import make_mesh, shard_model, shard_batch
+
+mesh = make_mesh()                       # axes ("data", "model"); make_mesh(model_axis=2) for tensor parallel
+shard_model(model, mesh, rule="replicated")
+batch = shard_batch(batch, mesh)         # batch size must be a multiple of batch_size_divisor(mesh)
+```
+
+Models build without a mesh (`eager_sharding=False`); parameters carry logical
+axis names (`embed`, `mlp`, `heads`, `vocab`, `in`, `out`) that `shard_model`
+maps to mesh axes. Rules: `replicated` (default, pure data parallel), plus
+`fsdp` and `tensor`, both **experimental** (each call emits a `UserWarning`).
+Under a non-replicated rule, unknown, indivisible or unannotated params fall back
+to replicated with one warning. If you add layers, annotate every `nnx.Param`
+with `axes(...)` or `partitioned(init, names)` from `heal_swin_nnx.sharding`.
+See `examples/mnist_healpix_classify_sharded.py` (rule via `HEALSWIN_SHARDING_RULE`).
+Tests run on 8 emulated CPU devices (`XLA_FLAGS=--xla_force_host_platform_device_count=8`,
+set by pytest-env); `sharding` tests skip with fewer than 8 devices.
+
 ## Tests
 
 ```bash
