@@ -184,13 +184,3 @@ serialization (`test_params.py`); buffer/param separation
 (`test_buffers.py`); and JAX-native behavior — jit/eager equivalence, batch
 independence, `nnx.remat` matching non-remat, standalone encoder, and all
 HEALPix shift strategies (`test_model.py`).
-
-## Design docs
-
-- [`docs/superpowers/specs/2026-07-12-healswin-nnx-port-design.md`](docs/superpowers/specs/2026-07-12-healswin-nnx-port-design.md) —
-  original port design spec (module surface, config shape, buffer strategy,
-  shift-strategy semantics).
-- [`docs/superpowers/plans/2026-07-12-healswin-nnx-port.md`](docs/superpowers/plans/2026-07-12-healswin-nnx-port.md) —
-  the task-by-task implementation plan the port followed.
-- [`docs/superpowers/specs/2026-07-12-config-cleanup-design.md`](docs/superpowers/specs/2026-07-12-config-cleanup-design.md) —
-  design spec for the config unification, cleanup, and RoPE work that followed.
