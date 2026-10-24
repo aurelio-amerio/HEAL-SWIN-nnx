@@ -25,7 +25,10 @@ testpaths = ["tests"]
 addopts = "-n 2"
 env = [
     "JAX_PLATFORMS=cpu",
-    "XLA_FLAGS=--xla_force_host_platform_device_count=8",
+    # jaxlib >= 0.12 lets XNNPACK pick CPU-specific f32 dot kernels (google/XNNPACK#11736), so rounding
+    # differs between CI runners and dev machines. Request CPU-consistent arithmetic (same flag as
+    # GenSBI) so a CI numerics failure reproduces locally. Accepted by jax >= 0.11.1.
+    "XLA_FLAGS=--xla_cpu_enable_platform_dependent_math=false --xla_force_host_platform_device_count=8",
 ]
 markers = [
     "sharding: multi-device sharding tests (those marked requires_8_devices skip with fewer than 8 devices)",

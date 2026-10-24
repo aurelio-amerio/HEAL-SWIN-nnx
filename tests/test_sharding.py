@@ -330,9 +330,13 @@ def test_fsdp_places_qkv_and_mlp_kernels_over_data_and_buffers_replicated():
 @pytest.mark.parametrize("rule", ["replicated", "fsdp"])
 def test_one_gradient_step_matches_unsharded(rule):
     p = _tiny_params(dtype="float32")
+    # Adam's first step is ~lr*sign(g) once |g| >> eps, so with the default eps=1e-8 an element with
+    # |g| ~ 4e-7 (tensor max ~4e-2) turns reduction-order noise between the full-batch and per-device
+    # programs into an O(lr) parameter difference (seen on CI runners). eps=1e-3 keeps the update
+    # Lipschitz in g (|d update| <= lr*|dg|/eps = |dg|), so the param check bounds gradient agreement.
     def make():
         m = HealSwin(p, rngs=nnx.Rngs(0)); m.train()
-        return m, nnx.Optimizer(m, optax.adamw(1e-3), wrt=nnx.Param)
+        return m, nnx.Optimizer(m, optax.adamw(1e-3, eps=1e-3), wrt=nnx.Param)
     ref, opt_ref = make(); m, opt = make()
     mesh = sh.make_mesh(); sh.shard_model(m, mesh, rule); sh.shard_model(opt, mesh, rule)
     x = _batch(16, p, jax.random.key(1))
